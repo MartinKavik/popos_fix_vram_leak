@@ -4,8 +4,8 @@ Fixes a VRAM leak in the COSMIC compositor where GPU texture memory is never rec
 
 ## Forked Repositories
 
-- **Smithay (the critical fix):** [github.com/MartinKavik/smithay](https://github.com/MartinKavik/smithay) — branch `fix_vram_leak`
-- **cosmic-comp:** [github.com/MartinKavik/cosmic-comp](https://github.com/MartinKavik/cosmic-comp) — branch `fix_vram_leak`
+- **Smithay (the critical fix):** [github.com/MartinKavik/smithay @ fix_vram_leak](https://github.com/MartinKavik/smithay/tree/fix_vram_leak) — [diff vs upstream master](https://github.com/Smithay/smithay/compare/master...MartinKavik:smithay:fix_vram_leak)
+- **cosmic-comp:** [github.com/MartinKavik/cosmic-comp @ fix_vram_leak](https://github.com/MartinKavik/cosmic-comp/tree/fix_vram_leak) — [diff vs upstream master](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:fix_vram_leak)
 
 ## Overview
 
