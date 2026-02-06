@@ -4,7 +4,7 @@ set -euo pipefail
 # Open/close windows in cycles, measure VRAM deltas.
 # Run from a terminal inside the cosmic-debug.sh session.
 
-CYCLES="${CYCLES:-3}"
+CYCLES="${CYCLES:-5}"
 WINDOWS="${WINDOWS:-20}"
 OPEN_CMD="${OPEN_CMD:-cosmic-term}"
 SLEEP_OPEN="${SLEEP_OPEN:-5}"

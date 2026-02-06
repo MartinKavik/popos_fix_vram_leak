@@ -78,16 +78,16 @@ Two scripts are included for reproducing and verifying the fix. Defaults work on
 Run from a terminal inside the `cosmic-debug.sh` session:
 
 ```bash
-# Default: 3 cycles of 20 windows
+# Default: 5 cycles of 20 windows
 ./cosmic-vram-test.sh
 
 # Custom
-CYCLES=5 WINDOWS=30 ./cosmic-vram-test.sh
+CYCLES=3 WINDOWS=30 ./cosmic-vram-test.sh
 ```
 
 | Env var | Default | Description |
 |---------|---------|-------------|
-| `CYCLES` | `3` | Number of open/close cycles |
+| `CYCLES` | `5` | Number of open/close cycles |
 | `WINDOWS` | `20` | Windows per cycle |
 | `OPEN_CMD` | `cosmic-term` | App to launch |
 | `SLEEP_OPEN` | `5` | Seconds after opening |
@@ -98,3 +98,54 @@ CYCLES=5 WINDOWS=30 ./cosmic-vram-test.sh
 **Expected output (fixed):** VRAM delta stays flat across cycles (~3 MB noise), prints `PASS`.
 
 **Broken output:** VRAM delta grows linearly (~3 MB per window per cycle), prints `FAIL`.
+
+### Measuring per-fix VRAM savings
+
+To measure each fix's individual VRAM impact, build 4 configurations with different fixes enabled/disabled and test each one.
+
+**Configurations:**
+
+| Config | Smithay branch | Shader fix (cosmic-comp) | What's tested |
+|--------|---------------|-------------------------|---------------|
+| A | `master` | disabled | No fixes (baseline) |
+| B | `fix_vram_leak` | disabled | Smithay texture fix only |
+| C | `master` | enabled | Shader cache fix only |
+| D | `fix_vram_leak` | enabled | All fixes |
+
+**How to toggle fixes:**
+
+- **Smithay texture fix:** Switch branch in the smithay repo between `master` and `fix_vram_leak`
+- **Shader cache fix:** Comment/uncomment the cleanup block in `cosmic-comp/src/backend/kms/surface/mod.rs`:
+  ```rust
+  // Comment out these 5 lines to disable:
+  let pending_cleanup = {
+      let mut shell_guard = self.shell.write();
+      std::mem::take(&mut shell_guard.pending_shader_cleanup)
+  };
+  if !pending_cleanup.is_empty() {
+      remove_from_shader_caches(&renderer, &pending_cleanup);
+  }
+  ```
+- **Activation token fix:** CPU memory only — no VRAM impact, no need to toggle
+
+**Build and test each configuration:**
+
+```bash
+# 1. Switch smithay branch
+cd ~/repos/smithay && git checkout master   # or fix_vram_leak
+
+# 2. Toggle shader fix in cosmic-comp (edit the file above)
+
+# 3. Build
+cd ~/repos/cosmic-comp && cargo build --release
+
+# 4. Save the binary (optional — avoids rebuilding)
+cp target/release/cosmic-comp ~/repos/popos_fix_vram_leak/builds/cosmic-comp-A
+
+# 5. Switch to TTY (Ctrl+Alt+F3), start compositor, run test
+COSMIC_COMP_BIN=~/repos/popos_fix_vram_leak/builds/cosmic-comp-A ./cosmic-debug.sh start
+# Inside compositor terminal:
+./cosmic-vram-test.sh | tee results/results-A.txt
+```
+
+Repeat for configs B, C, D. Compare the "Total delta" line from each to see per-fix savings.

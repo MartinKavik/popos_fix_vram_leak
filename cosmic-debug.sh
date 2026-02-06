@@ -36,8 +36,8 @@ cmd_start() {
   echo "  LIBSEAT_BACKEND=$LIBSEAT_BACKEND"
   echo ""
 
-  # Truncate log
-  : > "$LOG_FILE"
+  # Truncate log and make writable by non-root users
+  sudo sh -c ": > '$LOG_FILE' && chmod 666 '$LOG_FILE'"
 
   # Stop all graphical services (greeter, compositor, display manager)
   echo "Isolating to multi-user.target..."
