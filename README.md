@@ -53,7 +53,7 @@ Two scripts are included for reproducing and verifying the fix. Defaults work on
 ### Prerequisites
 
 1. Build cosmic-comp: `cargo build --release` in the cosmic-comp repo
-2. Run from a TTY (Ctrl+Alt+F3), not from within a desktop session
+2. Switch to a TTY first (e.g. Ctrl+Alt+F3) — do not run from within a desktop session
 3. NVIDIA GPU with `nvidia-smi` available
 
 ### `cosmic-debug.sh` — Start/stop the debug compositor
@@ -70,7 +70,6 @@ Two scripts are included for reproducing and verifying the fix. Defaults work on
 |---------|---------|-------------|
 | `COSMIC_COMP_BIN` | `~/repos/cosmic-comp/target/release/cosmic-comp` | Path to binary |
 | `LOG_FILE` | `/tmp/cosmic-debug.log` | Log output |
-| `VT_TARGET` | `3` | VT to switch to |
 | `RUST_LOG` | `info,smithay=info` | Log filter |
 | `LIBSEAT_BACKEND` | `seatd` | Seat backend |
 

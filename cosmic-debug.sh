@@ -12,8 +12,7 @@ Usage:
 
 Environment variables (all optional):
   COSMIC_COMP_BIN  Path to binary    (default: ~/repos/cosmic-comp/target/release/cosmic-comp)
-  LOG_FILE         Log output        (default: ~/cosmic-debug.log)
-  VT_TARGET        VT to switch to   (default: 3)
+  LOG_FILE         Log output        (default: /tmp/cosmic-debug.log)
   RUST_LOG         Log filter        (default: info,smithay=info)
   LIBSEAT_BACKEND  Seat backend      (default: seatd)
 EOF
@@ -21,7 +20,6 @@ EOF
 
 COSMIC_COMP_BIN="${COSMIC_COMP_BIN:-$HOME/repos/cosmic-comp/target/release/cosmic-comp}"
 LOG_FILE="${LOG_FILE:-/tmp/cosmic-debug.log}"
-VT_TARGET="${VT_TARGET:-3}"
 RUST_LOG="${RUST_LOG:-info,smithay=info}"
 LIBSEAT_BACKEND="${LIBSEAT_BACKEND:-seatd}"
 
@@ -34,17 +32,12 @@ cmd_start() {
   echo "Config:"
   echo "  COSMIC_COMP_BIN=$COSMIC_COMP_BIN"
   echo "  LOG_FILE=$LOG_FILE"
-  echo "  VT_TARGET=$VT_TARGET"
   echo "  RUST_LOG=$RUST_LOG"
   echo "  LIBSEAT_BACKEND=$LIBSEAT_BACKEND"
   echo ""
 
   # Truncate log
   : > "$LOG_FILE"
-
-  # Switch to target VT
-  echo "Switching to VT $VT_TARGET..."
-  sudo chvt "$VT_TARGET"
 
   # Stop all graphical services (greeter, compositor, display manager)
   echo "Isolating to multi-user.target..."
@@ -54,16 +47,19 @@ cmd_start() {
   # Safety kill any leftover cosmic-comp
   sudo pkill -x cosmic-comp 2>/dev/null || true
 
-  # Ensure runtime dir and seatd
+  # Ensure runtime dir
   sudo mkdir -p /run/user/0
   sudo chmod 700 /run/user/0
-  sudo systemctl start seatd || true
 
-  # Launch cosmic-comp as root
+  # Stop system seatd and clean socket — seatd-launch will start a fresh instance
+  sudo systemctl stop seatd 2>/dev/null || true
+  sudo rm -f /run/seatd.sock
+
+  # Launch cosmic-comp via seatd-launch (provides a clean seatd session)
   echo "Starting cosmic-comp..."
   echo "Log: $LOG_FILE"
   echo ""
-  sudo env \
+  sudo -E env \
     LANG=en_US.UTF-8 \
     LC_ALL=en_US.UTF-8 \
     RUST_LOG="$RUST_LOG" \
@@ -71,16 +67,24 @@ cmd_start() {
     LIBSEAT_BACKEND="$LIBSEAT_BACKEND" \
     XDG_RUNTIME_DIR=/run/user/0 \
     SMITHAY_CACHE_LOG=1 \
-    "$COSMIC_COMP_BIN" 2>&1 | tee -a "$LOG_FILE"
+    seatd-launch -- "$COSMIC_COMP_BIN" 2>&1 | tee -a "$LOG_FILE"
 }
 
 cmd_stop() {
-  echo "Stopping cosmic-comp..."
-  sudo pkill -x cosmic-comp 2>/dev/null || true
-  sleep 1
+  echo "Stopping compositor and restoring desktop..."
 
-  echo "Restoring graphical.target..."
-  sudo systemctl isolate graphical.target
+  # Run stop sequence detached — if run from inside the compositor,
+  # killing cosmic-comp kills the terminal and this script with it.
+  # setsid + nohup ensures the sequence completes regardless.
+  sudo setsid nohup bash -c '
+    sleep 0.5
+    pkill -x cosmic-comp 2>/dev/null || true
+    pkill -x seatd-launch 2>/dev/null || true
+    rm -f /run/seatd.sock
+    sleep 1
+    systemctl start seatd || true
+    systemctl isolate graphical.target
+  ' &>/dev/null &
 }
 
 case "${1:-}" in
