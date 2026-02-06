@@ -77,22 +77,22 @@ Saves **~97 MB per 20-window cycle** (~4.8 MB per cosmic-term window). This is t
 ### Fix 3: Activation token cleanup (cosmic-comp)
 CPU RAM only — not measurable via GPU VRAM.
 
-## Building
+## Merging Upstream
 
-The cosmic-comp fork's `Cargo.toml` uses `[patch]` sections to point `smithay` to a local path (`../smithay`) for development. The upstream `Cargo.toml` pins smithay to a git rev — the path override should be reverted before submitting upstream PRs:
+The **smithay fix must be merged first** — the cosmic-comp changes depend on it.
 
-```toml
-# Current (for local testing):
-[patch.crates-io]
-smithay = { path = "../smithay" }
+1. Merge the [smithay fix](https://github.com/Smithay/smithay/compare/master...MartinKavik:smithay:fix_vram_leak) into upstream smithay
+2. Update cosmic-comp's `Cargo.toml` to point smithay to the merged commit (git rev) or a crate version that includes it — replace the local `path` override:
+   ```toml
+   [patch.crates-io]
+   smithay = { git = "https://github.com/smithay/smithay.git", rev = "<merged-commit-hash>" }
+   ```
+   and remove the `[patch."https://github.com/smithay/smithay.git"]` section (only needed for local path overrides)
+3. Merge the [cosmic-comp fix](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:fix_vram_leak)
 
-[patch."https://github.com/smithay/smithay.git"]
-smithay = { path = "../smithay" }
+## Building (local development)
 
-# For upstream PR, replace with git ref:
-[patch.crates-io]
-smithay = { git = "https://github.com/smithay/smithay.git", rev = "<commit-hash>" }
-```
+The cosmic-comp fork's `Cargo.toml` currently uses `[patch]` sections to point `smithay` to a local path (`../smithay`) for development and testing.
 
 ## Testing
 
