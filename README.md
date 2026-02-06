@@ -31,10 +31,10 @@ Shadow, Indicator, and Backdrop pixel shader elements are cached per-window in t
 
 **Files changed:**
 - `src/backend/render/mod.rs` — `remove_from_shader_caches()` function and render-loop integration
-- `src/backend/render/shadow.rs` — made `ShadowCache` type public
+- `src/backend/render/shadow.rs` — `ShadowCache` visibility changed to `pub(super)` (accessible within render module)
 - `src/shell/mod.rs` — `pending_shader_cleanup` queue, populated during `unmap_surface()`
 - `src/shell/element/mod.rs` — `Debug` impl for `CosmicMappedKey`
-- `src/backend/kms/surface/mod.rs` — process pending cleanup in KMS render path
+- `src/backend/render/mod.rs` also contains the render-loop cleanup call in `render_output()`
 
 ### 3. Activation Token Leak — CPU RAM only (cosmic-comp)
 
@@ -82,12 +82,12 @@ CPU RAM only — not measurable via GPU VRAM.
 The **smithay fix must be merged first** — the cosmic-comp changes depend on it.
 
 1. Merge the [smithay fix](https://github.com/Smithay/smithay/compare/master...MartinKavik:smithay:fix_vram_leak) into upstream smithay
-2. Update cosmic-comp's `Cargo.toml` to point smithay to the merged commit (git rev) or a crate version that includes it — replace the local `path` override:
+2. Update cosmic-comp's `Cargo.toml`: replace both local `path` overrides with a git rev pointing to the merged smithay commit:
    ```toml
    [patch.crates-io]
    smithay = { git = "https://github.com/smithay/smithay.git", rev = "<merged-commit-hash>" }
    ```
-   and remove the `[patch."https://github.com/smithay/smithay.git"]` section (only needed for local path overrides)
+   Remove the `[patch."https://github.com/smithay/smithay.git"]` section entirely (it's only needed for local path overrides)
 3. Merge the [cosmic-comp fix](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:fix_vram_leak)
 
 ## Building (local development)
@@ -163,16 +163,14 @@ To measure each fix's individual VRAM impact, build 4 configurations with differ
 **How to toggle fixes:**
 
 - **Smithay texture fix:** Switch branch in the smithay repo between `master` and `fix_vram_leak`
-- **Shader cache fix:** Comment/uncomment the cleanup block in `cosmic-comp/src/backend/kms/surface/mod.rs`:
+- **Shader cache fix:** Comment/uncomment the cleanup block in `cosmic-comp/src/backend/render/mod.rs` (inside `render_output()`):
   ```rust
-  // Comment out these 5 lines to disable:
+  // Comment out these 2 lines to disable:
   let pending_cleanup = {
-      let mut shell_guard = self.shell.write();
+      let mut shell_guard = shell.write();
       std::mem::take(&mut shell_guard.pending_shader_cleanup)
   };
-  if !pending_cleanup.is_empty() {
-      remove_from_shader_caches(&renderer, &pending_cleanup);
-  }
+  remove_from_shader_caches(renderer, &pending_cleanup);
   ```
 - **Activation token fix:** CPU memory only — no VRAM impact, no need to toggle
 
