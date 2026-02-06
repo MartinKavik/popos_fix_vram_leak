@@ -46,9 +46,20 @@ Shadow, Indicator, and Backdrop pixel shader elements are cached per-window in t
 - `src/wayland/handlers/xdg_shell/mod.rs` — remove activation token on Wayland toplevel destroy
 - `src/xwayland.rs` — remove activation token on X11 window destroy
 
+## Test Environment
+
+| Component | Details |
+|-----------|---------|
+| OS | Pop!_OS 24.04 LTS |
+| Kernel | 6.18.7-76061807-generic |
+| CPU | Intel Core i7-9700K @ 3.60GHz (8 cores) |
+| RAM | 48 GB DDR4 |
+| GPU | NVIDIA GeForce RTX 2070 (8 GB VRAM) |
+| Driver | 580.126.09 |
+
 ## Measured Impact
 
-Tested on NVIDIA RTX 2070, 5 cycles of 20 cosmic-term windows each.
+Tested on the hardware above, 5 cycles of 20 cosmic-term windows each.
 
 | Configuration | Smithay fix | Shader fix | Total VRAM delta | Per-cycle delta | Result |
 |--------------|------------|-----------|-----------------|----------------|--------|
@@ -65,6 +76,23 @@ Saves **~97 MB per 20-window cycle** (~4.8 MB per cosmic-term window). This is t
 
 ### Fix 3: Activation token cleanup (cosmic-comp)
 CPU RAM only — not measurable via GPU VRAM.
+
+## Building
+
+The cosmic-comp fork's `Cargo.toml` uses `[patch]` sections to point `smithay` to a local path (`../smithay`) for development. The upstream `Cargo.toml` pins smithay to a git rev — the path override should be reverted before submitting upstream PRs:
+
+```toml
+# Current (for local testing):
+[patch.crates-io]
+smithay = { path = "../smithay" }
+
+[patch."https://github.com/smithay/smithay.git"]
+smithay = { path = "../smithay" }
+
+# For upstream PR, replace with git ref:
+[patch.crates-io]
+smithay = { git = "https://github.com/smithay/smithay.git", rev = "<commit-hash>" }
+```
 
 ## Testing
 
