@@ -1,0 +1,49 @@
+=== VRAM Leak Test ===
+  CYCLES=5  WINDOWS=20  OPEN_CMD=cosmic-term
+  SLEEP_OPEN=5  SLEEP_CLOSE=5
+  MAX_VRAM_MB=5000 (0=disabled)
+  COMPOSITOR_LOG=/tmp/cosmic-debug.log
+
+Baseline: 193 MB VRAM
+
+--- Cycle 1/5 ---
+  Opening 20 windows...
+  Peak: 2205 MB VRAM
+  Closing windows...
+  Found 40 tagged processes
+  After close: 191 MB VRAM (delta: -2 MB from baseline)
+
+--- Cycle 2/5 ---
+  Opening 20 windows...
+  Peak: 2205 MB VRAM
+  Closing windows...
+  Found 40 tagged processes
+  After close: 191 MB VRAM (delta: -2 MB from baseline)
+
+--- Cycle 3/5 ---
+  Opening 20 windows...
+  Peak: 2205 MB VRAM
+  Closing windows...
+  Found 40 tagged processes
+  After close: 191 MB VRAM (delta: -2 MB from baseline)
+
+--- Cycle 4/5 ---
+  Opening 20 windows...
+  Peak: 2205 MB VRAM
+  Closing windows...
+  Found 40 tagged processes
+  After close: 191 MB VRAM (delta: -2 MB from baseline)
+
+--- Cycle 5/5 ---
+  Opening 20 windows...
+  Peak: 2205 MB VRAM
+  Closing windows...
+  Found 40 tagged processes
+  After close: 191 MB VRAM (delta: -2 MB from baseline)
+
+=== Summary ===
+  Baseline: 193 MB
+  Final:    191 MB
+  Total delta: -2 MB after 5 cycles of 20 windows
+
+  PASS - VRAM is stable (delta <= 10 MB)

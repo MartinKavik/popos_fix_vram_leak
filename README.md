@@ -1,6 +1,6 @@
 # Pop!_OS VRAM Leak Fix
 
-Fixes a VRAM leak in the COSMIC compositor where GPU texture memory is never reclaimed when windows are closed. On an NVIDIA RTX 2070, this leaks ~3 MB of VRAM per window, accumulating indefinitely.
+Fixes a VRAM leak in the COSMIC compositor where GPU texture memory is never reclaimed when windows are closed. On an NVIDIA RTX 2070, this leaks ~4.8 MB of VRAM per cosmic-term window, accumulating indefinitely. Also fixes two smaller CPU RAM leaks (shader caches and activation tokens).
 
 ## Forked Repositories
 
@@ -17,15 +17,15 @@ In wayland-server 0.31.x, `SurfaceUserData` (and therefore `data_map`) stays ali
 
 **Fix:** In the surface destruction hook (alongside the existing `reset()` call), also clear `MultiTextureInternal`'s texture `HashMap` through the `data_map` Arc reference. This ensures GPU resources are freed immediately regardless of Arc lifetime.
 
-**Impact:** VRAM growth went from ~60 MB per 20-window cycle to ~3 MB (flat).
+**Impact:** ~4.8 MB VRAM leaked per cosmic-term window (~97 MB per 20-window cycle). With the fix, VRAM stays flat.
 
 **Files changed:**
 - `src/backend/renderer/multigpu/mod.rs` — added `clear_textures()` method on `MultiTextureInternal`
 - `src/backend/renderer/utils/wayland.rs` — call `clear_textures()` in the destruction hook
 
-### 2. Shader Cache Leak (cosmic-comp)
+### 2. Shader Cache Leak — CPU RAM only (cosmic-comp)
 
-Shadow, Indicator, and Backdrop pixel shader elements are cached per-window in the EGL context's `user_data()` but never cleaned up when windows close. This leaks GPU shader element memory (smaller than the texture VRAM leak, but still grows unbounded).
+Shadow, Indicator, and Backdrop pixel shader elements are cached per-window in the EGL context's `user_data()` but never cleaned up when windows close. These caches store CPU-side data only (shader parameters, geometry, uniforms) — not GPU textures — so this is a RAM leak, not a VRAM leak. Each entry is small (a few hundred bytes), but they accumulate unbounded.
 
 **Fix:** Added `remove_from_shader_caches()` called from the render loop via a deferred `pending_shader_cleanup` queue on `Shell`.
 
@@ -36,15 +36,35 @@ Shadow, Indicator, and Backdrop pixel shader elements are cached per-window in t
 - `src/shell/element/mod.rs` — `Debug` impl for `CosmicMappedKey`
 - `src/backend/kms/surface/mod.rs` — process pending cleanup in KMS render path
 
-### 3. Activation Token Leak (cosmic-comp)
+### 3. Activation Token Leak — CPU RAM only (cosmic-comp)
 
-`pending_activations` `HashMap` entries for destroyed windows were never removed. Tokens accumulate in memory indefinitely.
+`pending_activations` `HashMap` entries for destroyed windows were never removed. Tokens accumulate in CPU RAM indefinitely.
 
 **Fix:** Clean up Wayland activation tokens in `toplevel_destroyed()` and X11 tokens in `destroyed_window()`.
 
 **Files changed:**
 - `src/wayland/handlers/xdg_shell/mod.rs` — remove activation token on Wayland toplevel destroy
 - `src/xwayland.rs` — remove activation token on X11 window destroy
+
+## Measured Impact
+
+Tested on NVIDIA RTX 2070, 5 cycles of 20 cosmic-term windows each.
+
+| Configuration | Smithay fix | Shader fix | Total VRAM delta | Per-cycle delta | Result |
+|--------------|------------|-----------|-----------------|----------------|--------|
+| A. No fixes (baseline) | off | off | +483 MB | ~97 MB/cycle | FAIL |
+| B. Smithay fix only | **on** | off | -6 MB | 0 MB/cycle | PASS |
+| C. Shader fix only | off | **on** | +471 MB | ~94 MB/cycle | FAIL |
+| D. All fixes | **on** | **on** | -2 MB | 0 MB/cycle | PASS |
+
+### Fix 1: MultiTextureInternal clear (smithay)
+Saves **~97 MB per 20-window cycle** (~4.8 MB per cosmic-term window). This is the entire VRAM fix — configs B and D are flat, while A and C leak identically.
+
+### Fix 2: Shader cache cleanup (cosmic-comp)
+**No measurable VRAM impact.** Configs A and C show identical VRAM growth (~483 vs ~471 MB). The shader caches store CPU-side data only (shader parameters, geometry, uniforms) — not GPU textures. This fix prevents unbounded CPU RAM growth, not VRAM.
+
+### Fix 3: Activation token cleanup (cosmic-comp)
+CPU RAM only — not measurable via GPU VRAM.
 
 ## Testing
 
@@ -95,9 +115,9 @@ CYCLES=3 WINDOWS=30 ./cosmic-vram-test.sh
 | `MAX_VRAM_MB` | `5000` | Safety abort threshold (0 = disabled) |
 | `COMPOSITOR_LOG` | `/tmp/cosmic-debug.log` | Compositor log path (for smithay stats) |
 
-**Expected output (fixed):** VRAM delta stays flat across cycles (~3 MB noise), prints `PASS`.
+**Expected output (fixed):** VRAM delta stays flat across cycles, prints `PASS`.
 
-**Broken output:** VRAM delta grows linearly (~3 MB per window per cycle), prints `FAIL`.
+**Broken output:** VRAM delta grows linearly (~4.8 MB per cosmic-term window per cycle), prints `FAIL`.
 
 ### Measuring per-fix VRAM savings
 

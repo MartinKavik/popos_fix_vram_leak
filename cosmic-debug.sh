@@ -44,7 +44,8 @@ cmd_start() {
   sudo systemctl isolate multi-user.target
   sleep 2
 
-  # Safety kill any leftover cosmic-comp
+  # Safety kill any leftover cosmic-comp (including renamed binaries like cosmic-comp-A)
+  sudo pkill -x "cosmic-comp-[A-Z]" 2>/dev/null || true
   sudo pkill -x cosmic-comp 2>/dev/null || true
 
   # Ensure runtime dir
@@ -78,6 +79,7 @@ cmd_stop() {
   # setsid + nohup ensures the sequence completes regardless.
   sudo setsid nohup bash -c '
     sleep 0.5
+    pkill -x "cosmic-comp-[A-Z]" 2>/dev/null || true
     pkill -x cosmic-comp 2>/dev/null || true
     pkill -x seatd-launch 2>/dev/null || true
     rm -f /run/seatd.sock
