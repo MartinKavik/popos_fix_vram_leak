@@ -19,6 +19,8 @@ In wayland-server 0.31.x, `SurfaceUserData` (and therefore `data_map`) stays ali
 
 **Impact:** ~4.8 MB VRAM leaked per cosmic-term window (~97 MB per 20-window cycle). With the fix, VRAM stays flat.
 
+**Why clear the internals instead of dropping the Arc?** The Arc lives in `SurfaceData.data_map`, which is a `UserDataMap` — an append-only type map with no `remove()` method. The Arc is trapped there until `SurfaceData` itself drops, which won't happen because cosmic-comp holds `WlSurface` handles after client disconnect. The "proper" fix would be adding `remove()` to `UserDataMap` or changing wayland-server to drop `SurfaceData` eagerly, but both are much larger changes to foundational types with concurrency implications. Clearing the textures HashMap is safe because an empty HashMap is a valid state (same as before first import), and no code accesses it after the destruction hook fires.
+
 **Files changed:**
 - `src/backend/renderer/multigpu/mod.rs` — added `clear_textures()` method on `MultiTextureInternal`
 - `src/backend/renderer/utils/wayland.rs` — call `clear_textures()` in the destruction hook
