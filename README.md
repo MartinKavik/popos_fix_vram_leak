@@ -48,33 +48,54 @@ Shadow, Indicator, and Backdrop pixel shader elements are cached per-window in t
 
 ## Testing
 
-Two helper scripts are included for reproducing and verifying the fix on a Pop!_OS system with an NVIDIA GPU:
+Two scripts are included for reproducing and verifying the fix. Defaults work on Pop!_OS with NVIDIA GPU, root + seatd.
 
-### `cosmic-kms-debug.sh`
+### Prerequisites
 
-Launcher script that stops the greeter, acquires DRM master, and runs a custom `cosmic-comp` binary directly on KMS. Handles session/VT management, seatd/logind backends, and cleanup.
+1. Build cosmic-comp: `cargo build --release` in the cosmic-comp repo
+2. Run from a TTY (Ctrl+Alt+F3), not from within a desktop session
+3. NVIDIA GPU with `nvidia-smi` available
 
-```bash
-# Start the debug compositor (from a TTY, not from within a desktop session)
-cosmic-kms-debug.sh start
-
-# Stop and restore the greeter
-cosmic-kms-debug.sh stop
-```
-
-### `cosmic-vram-plateau-auto.sh`
-
-Automated VRAM leak test. Opens N windows, snapshots VRAM, closes them, snapshots again, and repeats for multiple cycles. Reports per-cycle VRAM deltas.
+### `cosmic-debug.sh` — Start/stop the debug compositor
 
 ```bash
-# Run from a terminal within the debug compositor session
-# Default: 3 cycles of 20 windows each
-cosmic-vram-plateau-auto.sh
+# Start: stops desktop, launches custom cosmic-comp on KMS
+./cosmic-debug.sh start
 
-# Custom parameters
-CYCLES=5 WINDOWS_TARGET=30 cosmic-vram-plateau-auto.sh
+# Stop: kills compositor, restores desktop
+./cosmic-debug.sh stop
 ```
 
-**Expected output (fixed):** VRAM delta stays flat across cycles (~3 MB baseline noise).
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `COSMIC_COMP_BIN` | `~/repos/cosmic-comp/target/release/cosmic-comp` | Path to binary |
+| `LOG_FILE` | `/tmp/cosmic-debug.log` | Log output |
+| `VT_TARGET` | `3` | VT to switch to |
+| `RUST_LOG` | `info,smithay=info` | Log filter |
+| `LIBSEAT_BACKEND` | `seatd` | Seat backend |
 
-**Broken output:** VRAM delta grows linearly (~3 MB per window per cycle, never reclaimed).
+### `cosmic-vram-test.sh` — Automated VRAM leak test
+
+Run from a terminal inside the `cosmic-debug.sh` session:
+
+```bash
+# Default: 3 cycles of 20 windows
+./cosmic-vram-test.sh
+
+# Custom
+CYCLES=5 WINDOWS=30 ./cosmic-vram-test.sh
+```
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `CYCLES` | `3` | Number of open/close cycles |
+| `WINDOWS` | `20` | Windows per cycle |
+| `OPEN_CMD` | `cosmic-term` | App to launch |
+| `SLEEP_OPEN` | `5` | Seconds after opening |
+| `SLEEP_CLOSE` | `5` | Seconds after closing |
+| `MAX_VRAM_MB` | `5000` | Safety abort threshold (0 = disabled) |
+| `COMPOSITOR_LOG` | `/tmp/cosmic-debug.log` | Compositor log path (for smithay stats) |
+
+**Expected output (fixed):** VRAM delta stays flat across cycles (~3 MB noise), prints `PASS`.
+
+**Broken output:** VRAM delta grows linearly (~3 MB per window per cycle), prints `FAIL`.
