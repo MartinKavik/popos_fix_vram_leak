@@ -2,28 +2,38 @@
 
 Fixes a VRAM leak in the COSMIC compositor where GPU texture memory is never reclaimed when windows are closed. On an NVIDIA RTX 2070, this leaks ~4.8 MB of VRAM per cosmic-term window, accumulating indefinitely. Also fixes two smaller CPU RAM leaks (shader caches and activation tokens).
 
-## Forked Repositories
+## Forked Repository
 
-- **Smithay (the critical fix):** [github.com/MartinKavik/smithay @ fix_vram_leak](https://github.com/MartinKavik/smithay/tree/fix_vram_leak) — [diff vs upstream master](https://github.com/Smithay/smithay/compare/master...MartinKavik:smithay:fix_vram_leak)
 - **cosmic-comp:** [github.com/MartinKavik/cosmic-comp @ fix_vram_leak](https://github.com/MartinKavik/cosmic-comp/tree/fix_vram_leak) — [diff vs upstream master](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:fix_vram_leak)
+
+No smithay changes required — the fix is entirely in cosmic-comp.
 
 ## Overview
 
-### 1. VRAM Leak — MultiTextureInternal not cleared on surface destroy (smithay)
+### 1. VRAM Leak — ToplevelHandleState.window never cleared (cosmic-comp)
 
-**This is the main fix.** When a Wayland surface is destroyed, Smithay's destruction hook calls `RendererSurfaceState::reset()`, which drops its texture references. However, `MultiTextureInternal` (stored in the surface's `data_map` via an `Arc`) retains its own texture `HashMap`.
+**This is the main fix.** When a window is destroyed, cosmic-comp's `remove_toplevel()` sends `closed` events to protocol clients and removes the window from its `toplevels` Vec, but never clears the `window: Option<CosmicSurface>` field in each `ZcosmicToplevelHandleV1` handle's user data (`ToplevelHandleState`).
 
-In wayland-server 0.31.x, `SurfaceUserData` (and therefore `data_map`) stays alive as long as *any* Rust `WlSurface` handle exists — even after the client disconnects. cosmic-comp holds `WlSurface` handles beyond client disconnect, so `MultiTextureInternal` is never dropped and its GPU textures leak indefinitely.
+Protocol handle objects persist until the **client** explicitly destroys them. Long-running clients (cosmic-panel, cosmic-workspaces — and even cosmic-term itself, which binds to `zcosmic_toplevel_info_v1`) keep handles alive indefinitely. Each handle retains a `CosmicSurface` clone that shares `Arc<WindowInner>`, preventing the inner window from being dropped.
 
-**Fix:** In the surface destruction hook (alongside the existing `reset()` call), also clear `MultiTextureInternal`'s texture `HashMap` through the `data_map` Arc reference. This ensures GPU resources are freed immediately regardless of Arc lifetime.
+**The leak chain:**
+```
+ZcosmicToplevelHandleV1 (protocol object, alive until client destroys it)
+  -> ToplevelHandleState { window: Some(CosmicSurface) }
+    -> Window(Arc<WindowInner>)             <- prevents Arc refcount from reaching 0
+      -> ToplevelSurface { wl_surface, shell_surface }
+        -> 3 WlSurface handles (via shell_surface user data)
+          -> SurfaceUserData alive (wayland-server 0.31.x: lives as long as any handle)
+            -> data_map alive
+              -> Arc<Mutex<MultiTextureInternal>> alive -> GPU textures trapped
+```
+
+**Fix:** Set `handle_state.window = None` in both `remove_toplevel()` and `refresh()` (dead-window safety-net path) in `src/wayland/protocols/toplevel_info.rs`. This drops the `CosmicSurface` clone immediately, allowing `Arc<WindowInner>` refcount to reach 0, which drops all `WlSurface` handles, which drops `SurfaceUserData` and its `data_map`, which drops `MultiTextureInternal` and frees GPU textures.
 
 **Impact:** ~4.8 MB VRAM leaked per cosmic-term window (~97 MB per 20-window cycle). With the fix, VRAM stays flat.
 
-**Why clear the internals instead of dropping the Arc?** The Arc lives in `SurfaceData.data_map`, which is a `UserDataMap` — an append-only type map with no `remove()` method. The Arc is trapped there until `SurfaceData` itself drops, which won't happen because cosmic-comp holds `WlSurface` handles after client disconnect. The "proper" fix would be adding `remove()` to `UserDataMap` or changing wayland-server to drop `SurfaceData` eagerly, but both are much larger changes to foundational types with concurrency implications. Clearing the textures HashMap is safe because an empty HashMap is a valid state (same as before first import), and no code accesses it after the destruction hook fires.
-
 **Files changed:**
-- `src/backend/renderer/multigpu/mod.rs` — added `clear_textures()` method on `MultiTextureInternal`
-- `src/backend/renderer/utils/wayland.rs` — call `clear_textures()` in the destruction hook
+- `src/wayland/protocols/toplevel_info.rs` — clear `ToplevelHandleState.window` to `None` on toplevel removal
 
 ### 2. Shader Cache Leak — CPU RAM only (cosmic-comp)
 
@@ -48,6 +58,101 @@ Shadow, Indicator, and Backdrop pixel shader elements are cached per-window in t
 - `src/wayland/handlers/xdg_shell/mod.rs` — remove activation token on Wayland toplevel destroy
 - `src/xwayland.rs` — remove activation token on X11 window destroy
 
+## How We Diagnosed the Leak
+
+The VRAM leak was diagnosed through a systematic elimination process, narrowing from "something holds WlSurface handles" to the exact leaking clone of `Arc<WindowInner>`.
+
+### Phase 1: Identify the symptom
+
+VRAM grows ~4.8 MB per cosmic-term window and is never reclaimed. Smithay's `MultiTextureInternal` (GPU texture cache per surface) is trapped in the `data_map` of `SurfaceUserData`, which stays alive as long as any Rust `WlSurface` handle exists (wayland-server 0.31.x behavior). Something in cosmic-comp holds `WlSurface` handles after the client disconnects.
+
+### Phase 2: Static analysis of all CosmicSurface storage locations
+
+Audited every data structure in cosmic-comp that stores `CosmicSurface`, `CosmicMapped`, or `Window`:
+
+- Workspace layouts (floating/tiling) — cleaned in `unmap_element()`
+- Focus stacks — cleaned via `shift_remove` in `unmap_element()`
+- Sticky layer — checked and removed
+- Minimized windows — checked (found bugs, but not the primary leak)
+- `ToplevelInfoState.toplevels` Vec — removed by `remove_toplevel()`
+- `pending_windows` — retained by `alive()` check
+- Space elements — retained by `alive()` check
+- Render caches — use `Weak` references
+- Calloop executor — does NOT hold element references
+- Activation tokens — only store `String` keys, not surfaces
+- FloatingLayout animations — removed by `unmap(to=None)`
+- MoveGrabState — temporary, grab-scoped
+
+**Result:** All known data structures clean up properly. Static analysis exhausted.
+
+### Phase 3: Runtime diagnostics — comprehensive probes
+
+Added a delayed diagnostic callback (fires 500ms after `toplevel_destroyed`) that checks 14 probe points simultaneously:
+
+| Probe | What it checks | Result |
+|-------|---------------|--------|
+| ptr_focus | Pointer focus target | false |
+| ptr_pending | Pointer pending focus | false |
+| ptr_grabbed | Pointer grab surface | false |
+| kbd_focus | Keyboard focus target | false |
+| kbd_pending | Keyboard pending focus | false |
+| kbd_grabbed | Keyboard grab surface | false |
+| active_focus | ActiveFocus list | false |
+| in_element_for_surface | element_for_surface() lookup | false |
+| is_surface_mapped | is_surface_mapped() | false |
+| in_pending | pending_windows | false |
+| in_registered_toplevels | ToplevelInfoState.toplevels Vec | false |
+| in_any_space | All Space elements across all workspaces | false |
+| in_any_minimized | All minimized_windows across all workspaces | false |
+| in_any_fullscreen | Raw fullscreen fields (bypassing alive() filter) | false |
+
+**Result:** ALL probes false. The leaked reference is NOT in any cosmic-comp data structure accessible through the Shell or State. But `Arc::strong_count()` still shows extra references.
+
+### Phase 4: Per-clone tracking — the definitive answer
+
+Added instrumentation directly to smithay's `Window` struct:
+- `clone_id: u64` field on every `Window` instance (incremented atomically on each clone)
+- `clone_registry: Mutex<HashMap<u64, String>>` on `WindowInner`, recording the creation backtrace of every live clone
+- `dump_live_clones()` method to print all surviving clones after destruction
+
+After closing a window and waiting 500ms, `dump_live_clones()` reported exactly **one** surviving clone:
+
+```
+clone_id=1500: ToplevelHandleStateInner::from_window
+  at cosmic-comp/src/wayland/protocols/toplevel_info.rs:115
+  called from get_cosmic_toplevel request handler at line 200
+```
+
+**Root cause confirmed:** `ToplevelHandleStateInner::from_window(window)` clones the `CosmicSurface` into the protocol handle's user data. This clone is never cleared when the window is destroyed.
+
+**Key discovery:** Even in bare TTY testing (no cosmic-panel, no cosmic-workspaces), cosmic-term itself binds to `zcosmic_toplevel_info_v1` and requests handles for its own windows. So the leak affects EVERY window, not just sessions with panel/workspaces running.
+
+### Phase 5: Fix and verify
+
+Added `handle_state.lock().unwrap().window = None` in both `remove_toplevel()` and the `refresh()` dead-window path.
+
+Verification: `Arc::strong_count()` dropped from 3 to 2, then to 1 (only the diagnostic clone), then `WindowInner` DROPPED message confirmed full cleanup. VRAM stays flat.
+
+## Known Remaining Bugs (not causing VRAM leaks, but should be fixed)
+
+### Bug: Workspace::unmap_surface() only checks Fullscreen minimized
+**File:** `src/shell/workspace.rs:674`
+
+```rust
+// Only matches Fullscreen, skips Floating/Tiling:
+if let MinimizedWindow::Fullscreen { surface: s, .. } = m { s == surface } else { false }
+```
+
+Floating/Tiling minimized windows at workspace level are never removed on destroy. No `alive()` safety-net exists anywhere for minimized_windows.
+
+### Bug: WorkspaceSet::refresh() only refreshes active workspace
+**File:** `src/shell/mod.rs:583-606`
+
+Dead surfaces on non-active workspaces are never cleaned.
+
+### Bug: No alive() check for minimized_windows
+Neither `Workspace::refresh()` nor `WorkspaceSet::refresh()` retains minimized_windows by alive().
+
 ## Test Environment
 
 | Component | Details |
@@ -63,38 +168,15 @@ Shadow, Indicator, and Backdrop pixel shader elements are cached per-window in t
 
 Tested on the hardware above, 5 cycles of 20 cosmic-term windows each.
 
-| Configuration | Smithay fix | Shader fix | Total VRAM delta | Per-cycle delta | Result |
-|--------------|------------|-----------|-----------------|----------------|--------|
-| A. No fixes (baseline) | off | off | +483 MB | ~97 MB/cycle | FAIL |
-| B. Smithay fix only | **on** | off | -6 MB | 0 MB/cycle | PASS |
-| C. Shader fix only | off | **on** | +471 MB | ~94 MB/cycle | FAIL |
-| D. All fixes | **on** | **on** | -2 MB | 0 MB/cycle | PASS |
+**Without fix:** VRAM grows ~97 MB per cycle (~4.8 MB per window), accumulating indefinitely.
 
-### Fix 1: MultiTextureInternal clear (smithay)
-Saves **~97 MB per 20-window cycle** (~4.8 MB per cosmic-term window). This is the entire VRAM fix — configs B and D are flat, while A and C leak identically.
-
-### Fix 2: Shader cache cleanup (cosmic-comp)
-**No measurable VRAM impact.** Configs A and C show identical VRAM growth (~483 vs ~471 MB). The shader caches store CPU-side data only (shader parameters, geometry, uniforms) — not GPU textures. This fix prevents unbounded CPU RAM growth, not VRAM.
-
-### Fix 3: Activation token cleanup (cosmic-comp)
-CPU RAM only — not measurable via GPU VRAM.
+**With fix:** VRAM stays flat across all cycles.
 
 ## Merging Upstream
 
-The **smithay fix must be merged first** — the cosmic-comp changes depend on it.
+The fix is entirely in cosmic-comp — no smithay changes needed.
 
-1. Merge the [smithay fix](https://github.com/Smithay/smithay/compare/master...MartinKavik:smithay:fix_vram_leak) into upstream smithay
-2. Update cosmic-comp's `Cargo.toml`: replace both local `path` overrides with a git rev pointing to the merged smithay commit:
-   ```toml
-   [patch.crates-io]
-   smithay = { git = "https://github.com/smithay/smithay.git", rev = "<merged-commit-hash>" }
-   ```
-   Remove the `[patch."https://github.com/smithay/smithay.git"]` section entirely (it's only needed for local path overrides)
-3. Merge the [cosmic-comp fix](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:fix_vram_leak)
-
-## Building (local development)
-
-The cosmic-comp fork's `Cargo.toml` currently uses `[patch]` sections to point `smithay` to a local path (`../smithay`) for development and testing.
+1. Merge the [cosmic-comp fix](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:fix_vram_leak)
 
 ## Testing
 
@@ -148,52 +230,3 @@ CYCLES=3 WINDOWS=30 ./cosmic-vram-test.sh
 **Expected output (fixed):** VRAM delta stays flat across cycles, prints `PASS`.
 
 **Broken output:** VRAM delta grows linearly (~4.8 MB per cosmic-term window per cycle), prints `FAIL`.
-
-### Measuring per-fix VRAM savings
-
-To measure each fix's individual VRAM impact, build 4 configurations with different fixes enabled/disabled and test each one.
-
-**Configurations:**
-
-| Config | Smithay branch | Shader fix (cosmic-comp) | What's tested |
-|--------|---------------|-------------------------|---------------|
-| A | `master` | disabled | No fixes (baseline) |
-| B | `fix_vram_leak` | disabled | Smithay texture fix only |
-| C | `master` | enabled | Shader cache fix only |
-| D | `fix_vram_leak` | enabled | All fixes |
-
-**How to toggle fixes:**
-
-- **Smithay texture fix:** Switch branch in the smithay repo between `master` and `fix_vram_leak`
-- **Shader cache fix:** Comment/uncomment the cleanup block in `cosmic-comp/src/backend/render/mod.rs` (inside `render_output()`):
-  ```rust
-  // Comment out these 2 lines to disable:
-  let pending_cleanup = {
-      let mut shell_guard = shell.write();
-      std::mem::take(&mut shell_guard.pending_shader_cleanup)
-  };
-  remove_from_shader_caches(renderer, &pending_cleanup);
-  ```
-- **Activation token fix:** CPU memory only — no VRAM impact, no need to toggle
-
-**Build and test each configuration:**
-
-```bash
-# 1. Switch smithay branch
-cd ~/repos/smithay && git checkout master   # or fix_vram_leak
-
-# 2. Toggle shader fix in cosmic-comp (edit the file above)
-
-# 3. Build
-cd ~/repos/cosmic-comp && cargo build --release
-
-# 4. Save the binary (optional — avoids rebuilding)
-cp target/release/cosmic-comp ~/repos/popos_fix_vram_leak/builds/cosmic-comp-A
-
-# 5. Switch to TTY (Ctrl+Alt+F3), start compositor, run test
-COSMIC_COMP_BIN=~/repos/popos_fix_vram_leak/builds/cosmic-comp-A ./cosmic-debug.sh start
-# Inside compositor terminal:
-./cosmic-vram-test.sh | tee results/results-A.txt
-```
-
-Repeat for configs B, C, D. Compare the "Total delta" line from each to see per-fix savings.
