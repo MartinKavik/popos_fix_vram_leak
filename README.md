@@ -2,13 +2,18 @@
 
 Fixes a VRAM leak in the COSMIC compositor where GPU texture memory is never reclaimed when windows are closed. On an NVIDIA RTX 2070, this leaks ~4.8 MB of VRAM per cosmic-term window, accumulating indefinitely. Also fixes two smaller CPU RAM leaks (shader caches and activation tokens).
 
-## Forked Repository
+**The leak affects all Smithay-based compositors** — Niri has the same root cause ([YaLTeR/niri#1869](https://github.com/YaLTeR/niri/issues/1869)), not just cosmic-comp. Smithay maintainer cmeissl is actively working on upstream fixes.
+
+## Forked Repositories
 
 - **cosmic-comp:** [github.com/MartinKavik/cosmic-comp @ fix_vram_leak](https://github.com/MartinKavik/cosmic-comp/tree/fix_vram_leak) — [diff vs upstream master](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:fix_vram_leak)
-
-No smithay changes required — the fix is entirely in cosmic-comp.
+  Working quick fix: 3 leaks addressed (VRAM + shader cache + activation tokens)
+- **smithay:** [github.com/MartinKavik/smithay @ fix_vram_leak](https://github.com/MartinKavik/smithay/tree/fix_vram_leak) — [diff vs upstream master](https://github.com/Smithay/smithay/compare/master...MartinKavik:smithay:fix_vram_leak)
+  Workaround that confirmed the theory (clears `MultiTextureInternal` on surface destroy; breaks window closing animations, doesn't resolve stale Arc references — not for production merge)
 
 ## Overview
+
+Our cosmic-comp fix is a **working quick-path** that stops the VRAM leak by clearing stale references at the compositor level. The proper long-term solution requires coordinated API changes between cosmic-comp and smithay to make this class of leak structurally impossible.
 
 ### 1. VRAM Leak — ToplevelHandleState.window never cleared (cosmic-comp)
 
@@ -57,6 +62,159 @@ Shadow, Indicator, and Backdrop pixel shader elements are cached per-window in t
 **Files changed:**
 - `src/wayland/handlers/xdg_shell/mod.rs` — remove activation token on Wayland toplevel destroy
 - `src/xwayland.rs` — remove activation token on X11 window destroy
+
+## Smithay-Side Investigation
+
+We also investigated and confirmed the leak from the smithay side.
+
+**Our workaround:** Commit [`035e3c4`](https://github.com/MartinKavik/smithay/commit/035e3c4736a1fc4cc7fee5a184cd8fe54a4cdcfc) clears `MultiTextureInternal.textures` in the surface destruction hook in `src/backend/renderer/utils/wayland.rs`. Made `MultiTextureInternal` `pub(crate)`, added a `clear_textures()` method, and introduced a `MultiTextureUserData` type alias for the `Arc<Mutex<MultiTextureInternal>>`.
+
+**Result:** VRAM leak is resolved in nvidia-smi when smithay is patched this way — confirms that the VRAM is trapped in `MultiTextureInternal` inside the surface's `data_map`.
+
+**Problems:**
+- **Breaks window closing animations** — textures are cleared before the compositor can render the final fade-out frames
+- **Doesn't fix the root cause** — stale `Arc` references in cosmic-comp still prevent `WindowInner` from being dropped, so other resources (shader caches, activation tokens, `RendererSurfaceState`) continue to leak
+- The smithay-side fix is treating the symptom (trapped textures), not the disease (stale references)
+
+**Takeaway:** This workaround proves the VRAM is trapped in `MultiTextureInternal` inside `SurfaceUserData.data_map`, reachable through the stale `WlSurface` handle chain. The cosmic-comp fix (clearing `ToplevelHandleState.window`) is the correct approach because it eliminates the stale reference itself, allowing the entire chain to be dropped naturally.
+
+## Upstream Status & Cross-Compositor Context
+
+**The leak is NOT cosmic-comp-specific — it affects all Smithay-based compositors.**
+
+The root cause spans two layers:
+
+**Compositor layer:** Stale references hold `WlSurface` handles past surface destruction. In cosmic-comp, it's `ToplevelHandleState.window`. In Niri, it was dead surface hooks being installed on already-destroyed surfaces.
+
+**Library layer:** wayland-server 0.31.x keeps `SurfaceUserData` alive as long as **any** Rust `WlSurface` handle exists. This means `data_map` → `MultiTextureInternal` → GPU textures are trapped until every handle is dropped.
+
+**Structural issue:** `UserDataMap` (smithay's `src/utils/user_data.rs`) is a lock-free **append-only** linked list — it has NO `clear()`, `remove()`, or any way to free individual entries. GPU textures stored in `data_map` are literally trapped until the entire `SurfaceData` is dropped.
+
+### Affected compositors
+
+- **Cosmic** — affected (our fix: [cosmic-comp @ fix_vram_leak](https://github.com/MartinKavik/cosmic-comp/tree/fix_vram_leak))
+- **Niri** — affected, fixed via [YaLTeR/niri#3404](https://github.com/YaLTeR/niri/pull/3404) (merged)
+- **River, Hyprland, Sway** — NOT affected (not Smithay-based)
+- Confirmed on both AMD and NVIDIA GPUs
+
+### cmeissl's upstream work
+
+- [Smithay PR #1921](https://github.com/Smithay/smithay/pull/1921) (DRAFT) — prevent hooks/blockers on destroyed surfaces; "might fix #1562"
+- [Smithay PR #1924](https://github.com/Smithay/smithay/pull/1924) (OPEN) — documents undefined destruction order for client disconnects
+- [Niri PR #3404](https://github.com/YaLTeR/niri/pull/3404) (MERGED) — fixes Niri's variant by preventing dead surface hook installation
+
+## Suggested Proper Fix — API-Level Solution
+
+The real fix is an API change in smithay that makes this class of leak **structurally impossible**.
+
+### The problem
+
+GPU resources (`MultiTextureInternal`, `RendererSurfaceState`) are stored in `SurfaceData.data_map`, which is an append-only `UserDataMap` tied to handle lifetime. This means:
+
+- **Current behavior:** GPU resource lifetime = max(all `WlSurface` handle lifetimes)
+- **Correct behavior:** GPU resource lifetime = surface protocol lifetime (ended by client destroy/disconnect)
+
+### Suggested solution — add `resource_map` to `SurfaceData`
+
+```rust
+// src/wayland/compositor/mod.rs
+pub struct SurfaceData {
+    pub role: Option<&'static str>,
+    pub data_map: UserDataMap,        // metadata — lives as long as any handle (append-only, unchanged)
+    pub resource_map: ResourceMap,     // NEW: GPU resources — cleared on surface destruction
+    pub cached_state: MultiCache,
+}
+```
+
+`ResourceMap` is like `UserDataMap` but supports clearing:
+
+```rust
+// src/utils/resource_map.rs (new)
+pub struct ResourceMap {
+    inner: Mutex<HashMap<TypeId, Box<dyn Any + Send + Sync>>>,
+}
+
+impl ResourceMap {
+    pub fn insert<T: Any + Send + Sync + 'static>(&self, value: T) { ... }
+    pub fn get<T: Any + Send + Sync + 'static>(&self) -> Option<MappedMutexGuard<T>> { ... }
+    pub fn clear(&self) { /* drops all entries — GPU textures freed immediately */ }
+}
+```
+
+### Migration
+
+Move GPU resources from `data_map` to `resource_map`:
+
+```rust
+// Before (can leak):
+states.data_map.insert_if_missing_threadsafe(|| Mutex::new(RendererSurfaceState::default()));
+states.data_map.insert_if_missing_threadsafe(|| texture_ref);  // MultiTextureUserData
+
+// After (cannot leak):
+states.resource_map.insert(Mutex::new(RendererSurfaceState::default()));
+states.resource_map.insert(texture_ref);  // MultiTextureUserData
+```
+
+### Automatic cleanup in surface destruction path
+
+```rust
+// src/wayland/compositor/tree.rs
+// In PrivateSurfaceData::cleanup() — called on surface destruction:
+
+// Clear resource_map — GPU textures freed immediately, regardless of handle lifetime
+guard.public_data.resource_map.clear();
+// data_map is NOT cleared — compositor metadata still available until last handle dropped
+```
+
+### Why this makes the leak impossible
+
+- GPU resources in `resource_map` are **always** freed when the surface is destroyed
+- Doesn't matter if compositors hold stale `WlSurface` handles — `resource_map` is already cleared
+- `data_map` still works for metadata compositors need after surface destruction
+- New code using `resource_map` for GPU resources automatically gets cleanup — **safe by default**
+- Backward compatible — existing `data_map` usage unchanged; migration can be gradual
+- Protects ALL smithay-based compositors (cosmic-comp, Niri, future compositors)
+- No need for each compositor to independently audit and fix their stale reference paths
+
+### What compositors should still do
+
+- Clean up stale references for correctness (avoids leaking non-GPU resources like shader caches)
+- But VRAM leaks become impossible at the API level
+
+## Related Issues and PRs
+
+### Smithay (library)
+
+| Issue/PR | Title | Status | Relevance |
+|---|---|---|---|
+| [#1562](https://github.com/Smithay/smithay/issues/1562) | Closing windows causes VRAM leak | OPEN (cmeissl) | Root upstream issue |
+| [PR #1921](https://github.com/Smithay/smithay/pull/1921) | Prevent hooks on destroyed surfaces | DRAFT | cmeissl's fix approach |
+| [PR #1924](https://github.com/Smithay/smithay/pull/1924) | Document destruction order | OPEN | Related docs |
+| [PR #1573](https://github.com/Smithay/smithay/pull/1573) | Session lock reference cycle fix | MERGED | Earlier ref-cycle leak (different root cause) |
+
+### cosmic-comp
+
+| Issue/PR | Title | Status | Relevance |
+|---|---|---|---|
+| [#1179](https://github.com/pop-os/cosmic-comp/issues/1179) | Video Memory Leak | OPEN | Main bug report |
+| [#1133](https://github.com/pop-os/cosmic-comp/issues/1133) | Memory leaks upon closing | OPEN | Related RAM leak reports |
+
+### Niri (also Smithay-based)
+
+| Issue/PR | Title | Status | Relevance |
+|---|---|---|---|
+| [#1869](https://github.com/YaLTeR/niri/issues/1869) | Video memory not released | COMPLETED | Same root cause, fixed via PR #3404 |
+| [#772](https://github.com/YaLTeR/niri/issues/772) | Memory leaking (screen locker) | COMPLETED | Different leak, fixed via smithay PR #1573 |
+| [PR #3404](https://github.com/YaLTeR/niri/pull/3404) | Fix dead surface hook | MERGED | cmeissl's fix for Niri's variant |
+| [#1742](https://github.com/YaLTeR/niri/issues/1742) | OOM crash on long sessions | OPEN | Potentially related |
+| [#3295](https://github.com/YaLTeR/niri/issues/3295) | GPU memory climbing when screens off | OPEN | Niri-specific, different trigger |
+
+### cosmic-epoch (same root cause)
+
+| Issue/PR | Title | Status | Relevance |
+|---|---|---|---|
+| [#1591](https://github.com/pop-os/cosmic-epoch/issues/1591) | cosmic-comp VRAM growing | OPEN | Same issue as cosmic-comp #1179 |
+| [#2122](https://github.com/pop-os/cosmic-epoch/issues/2122) | Memory increasing over time | OPEN | Likely partly caused by shader cache + activation token leaks |
 
 ## How We Diagnosed the Leak
 
@@ -153,6 +311,19 @@ Dead surfaces on non-active workspaces are never cleaned.
 ### Bug: No alive() check for minimized_windows
 Neither `Workspace::refresh()` nor `WorkspaceSet::refresh()` retains minimized_windows by alive().
 
+## Merging Upstream
+
+### Quick path (cosmic-comp only — what we have now)
+
+1. Merge the [cosmic-comp fix](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:fix_vram_leak) — stops the VRAM leak by clearing stale refs, also fixes shader cache and activation token leaks
+2. Works, tested, proven — but is a compositor-specific band-aid
+
+### Proper solution (needs maintainer coordination)
+
+3. Propose `resource_map` API change to smithay maintainers — makes VRAM leaks structurally impossible for ALL smithay-based compositors
+4. Coordinate with cmeissl (already working on [PR #1921](https://github.com/Smithay/smithay/pull/1921)) — the approaches are complementary
+5. Our smithay workaround (clearing `MultiTextureInternal` in destruction hook) is NOT recommended for merge — it breaks animations, but it proved the theory
+
 ## Test Environment
 
 | Component | Details |
@@ -171,12 +342,6 @@ Tested on the hardware above, 5 cycles of 20 cosmic-term windows each.
 **Without fix:** VRAM grows ~97 MB per cycle (~4.8 MB per window), accumulating indefinitely.
 
 **With fix:** VRAM stays flat across all cycles.
-
-## Merging Upstream
-
-The fix is entirely in cosmic-comp — no smithay changes needed.
-
-1. Merge the [cosmic-comp fix](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:fix_vram_leak)
 
 ## Testing
 
