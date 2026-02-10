@@ -13,7 +13,7 @@ Fixes a VRAM leak in the COSMIC compositor where GPU texture memory is never rec
 
 ## Overview
 
-Our cosmic-comp fix is a **working quick-path** that stops the VRAM leak by clearing stale references at the compositor level. The proper long-term solution requires coordinated API changes between cosmic-comp and smithay to make this class of leak structurally impossible.
+Our cosmic-comp fix is a **proven, tested solution** that stops the VRAM leak by clearing the specific stale reference (`ToplevelHandleState.window`) at the compositor level. A longer-term smithay-level solution to prevent this class of leak structurally is worth exploring, but any such API change would need to be designed with smithay and cosmic-comp maintainers — see [Draft Ideas for a Smithay-Level Solution](#draft-ideas-for-a-smithay-level-solution) for possible directions and open questions.
 
 ### 1. VRAM Leak — ToplevelHandleState.window never cleared (cosmic-comp)
 
@@ -103,83 +103,73 @@ The root cause spans two layers:
 - [Smithay PR #1924](https://github.com/Smithay/smithay/pull/1924) (OPEN) — documents undefined destruction order for client disconnects
 - [Niri PR #3404](https://github.com/YaLTeR/niri/pull/3404) (MERGED) — fixes Niri's variant by preventing dead surface hook installation
 
-## Suggested Proper Fix — API-Level Solution
+## Draft Ideas for a Smithay-Level Solution
 
-The real fix is an API change in smithay that makes this class of leak **structurally impossible**.
+> **Status: Draft — needs discussion with smithay and cosmic-comp maintainers before any implementation.**
+>
+> The ideas below are untested proposals. A proper solution would need to be designed collaboratively with cmeissl (who is already working on related fixes in [PR #1921](https://github.com/Smithay/smithay/pull/1921)) and the cosmic-comp team, then validated with real-world testing across compositors. Our cosmic-comp fix (clearing `ToplevelHandleState.window`) is the proven, working solution for now.
 
-### The problem
+### The structural problem
 
-GPU resources (`MultiTextureInternal`, `RendererSurfaceState`) are stored in `SurfaceData.data_map`, which is an append-only `UserDataMap` tied to handle lifetime. This means:
+GPU resources (`MultiTextureInternal`, `RendererSurfaceState`) are stored in `SurfaceData.data_map`, which is an append-only `UserDataMap` (lock-free linked list, no `clear()` or `remove()`) tied to handle lifetime. This means:
 
 - **Current behavior:** GPU resource lifetime = max(all `WlSurface` handle lifetimes)
 - **Correct behavior:** GPU resource lifetime = surface protocol lifetime (ended by client destroy/disconnect)
 
-### Suggested solution — add `resource_map` to `SurfaceData`
+Each compositor has hit this differently — cosmic-comp via a reference cycle in `ToplevelHandleState`, Niri via dead surface hook insertion — but the underlying storage design makes this class of bug easy to introduce and hard to prevent.
+
+### One possible approach — separate clearable storage for GPU resources
+
+The idea: add a second map to `SurfaceData` that can be cleared, and store GPU resources there instead of in the append-only `data_map`:
 
 ```rust
-// src/wayland/compositor/mod.rs
+// Conceptual sketch — NOT a concrete proposal
 pub struct SurfaceData {
     pub role: Option<&'static str>,
-    pub data_map: UserDataMap,        // metadata — lives as long as any handle (append-only, unchanged)
-    pub resource_map: ResourceMap,     // NEW: GPU resources — cleared on surface destruction
+    pub data_map: UserDataMap,        // metadata — append-only, unchanged
+    pub resource_map: ResourceMap,     // GPU resources — clearable on surface destruction
     pub cached_state: MultiCache,
 }
 ```
 
-`ResourceMap` is like `UserDataMap` but supports clearing:
+**Potential benefits:**
+- GPU resources freed on surface destruction regardless of stale handles
+- Compositor bugs can't cause VRAM leaks — safe by default
+- Backward compatible — existing `data_map` usage unchanged
+- Protects all smithay-based compositors, including future ones
 
-```rust
-// src/utils/resource_map.rs (new)
-pub struct ResourceMap {
-    inner: Mutex<HashMap<TypeId, Box<dyn Any + Send + Sync>>>,
-}
+### Open questions and concerns
 
-impl ResourceMap {
-    pub fn insert<T: Any + Send + Sync + 'static>(&self, value: T) { ... }
-    pub fn get<T: Any + Send + Sync + 'static>(&self) -> Option<MappedMutexGuard<T>> { ... }
-    pub fn clear(&self) { /* drops all entries — GPU textures freed immediately */ }
-}
-```
+This approach has several unresolved problems:
 
-### Migration
+**1. Window closing animations would break.** `PrivateSurfaceData::cleanup()` fires on surface destruction. If `resource_map` is cleared there, GPU textures are freed *before* the compositor can render fade-out animation frames. This is the **same problem** that made our smithay-side workaround (clearing `MultiTextureInternal` in the destruction hook) unsuitable — we documented it breaking animations. A proper solution would need a deferred cleanup mechanism, but then the library needs to know when animations are done, which requires compositor cooperation and defeats the "automatic cleanup" benefit.
 
-Move GPU resources from `data_map` to `resource_map`:
+**2. Performance in the hot render path.** The current `UserDataMap` uses a lock-free `AppendList` (atomic CAS append, lock-free read traversal). A `Mutex<HashMap>`-based `ResourceMap` means every texture lookup during rendering acquires a mutex — this runs per-surface per-frame at 60+ FPS. An `RwLock` or other concurrent map might mitigate this, but it needs benchmarking.
 
-```rust
-// Before (can leak):
-states.data_map.insert_if_missing_threadsafe(|| Mutex::new(RendererSurfaceState::default()));
-states.data_map.insert_if_missing_threadsafe(|| texture_ref);  // MultiTextureUserData
+**3. GPU vs. metadata boundary is fuzzy.** `RendererSurfaceState` contains both GPU state and non-GPU metadata. Developers would need to correctly classify every insertion into the right map. Misclassification in either direction causes problems (premature cleanup or continued leaking).
 
-// After (cannot leak):
-states.resource_map.insert(Mutex::new(RendererSurfaceState::default()));
-states.resource_map.insert(texture_ref);  // MultiTextureUserData
-```
+**4. Different root causes across compositors.** cmeissl explicitly noted: *"While the result is the same in niri and cosmic-comp they do not share the same root cause."* A `resource_map` addresses the symptom (trapped textures) universally, but each compositor has specific bugs that need fixing regardless for correctness (non-GPU resource leaks, etc.).
 
-### Automatic cleanup in surface destruction path
+### Alternative approaches worth exploring
 
-```rust
-// src/wayland/compositor/tree.rs
-// In PrivateSurfaceData::cleanup() — called on surface destruction:
+Several other directions could address the structural issue, each with different trade-offs:
 
-// Clear resource_map — GPU textures freed immediately, regardless of handle lifetime
-guard.public_data.resource_map.clear();
-// data_map is NOT cleared — compositor metadata still available until last handle dropped
-```
+- **cmeissl's defensive API approach (PR #1921):** Make `add_pre_commit_hook()`, `add_destruction_hook()`, etc. return `Result<_, DeadResource>`. Prevents compositors from accidentally holding dead surface references through hooks. Already in progress, addresses Niri's root cause directly. Doesn't prevent all reference cycle variants (like cosmic-comp's `ToplevelHandleState`).
 
-### Why this makes the leak impossible
+- **Add `clear()` or `remove()` to `UserDataMap`:** Simpler than a second map — make the existing storage clearable. Would require careful handling since `UserDataMap` is a lock-free `AppendList` not designed for removal. Clearing all entries might be easier than selective removal.
 
-- GPU resources in `resource_map` are **always** freed when the surface is destroyed
-- Doesn't matter if compositors hold stale `WlSurface` handles — `resource_map` is already cleared
-- `data_map` still works for metadata compositors need after surface destruction
-- New code using `resource_map` for GPU resources automatically gets cleanup — **safe by default**
-- Backward compatible — existing `data_map` usage unchanged; migration can be gradual
-- Protects ALL smithay-based compositors (cosmic-comp, Niri, future compositors)
-- No need for each compositor to independently audit and fix their stale reference paths
+- **`Weak` references for surface handles in compositor data structures:** If protocol state objects (like `ToplevelHandleState`) stored `Weak<WindowInner>` instead of `Arc<WindowInner>`, the reference cycle couldn't form. Requires compositor-side changes and constant alive-checking, which cmeissl noted as a downside.
 
-### What compositors should still do
+- **Deferred texture cleanup via compositor callback:** Instead of clearing in the destruction hook, let compositors register a "ready to free" callback after animations complete. More flexible but puts the burden back on compositor authors.
 
-- Clean up stale references for correctness (avoids leaking non-GPU resources like shader caches)
-- But VRAM leaks become impossible at the API level
+- **wayland-server handle lifetime changes:** The root of the issue is that wayland-server 0.31.x keeps `SurfaceUserData` alive as long as any Rust `WlSurface` handle exists. If `SurfaceUserData` were dropped at protocol-level surface destruction regardless of outstanding handles, the problem disappears. This is a wayland-rs change, not a smithay change.
+
+### What we recommend for now
+
+1. **Merge compositor-level fixes immediately** — our cosmic-comp fix is proven and tested, Niri's fix is already merged
+2. **Coordinate with cmeissl on smithay-level improvements** — his PR #1921 and documentation work (PR #1924) are the right foundation
+3. **Discuss the structural `data_map` problem** with smithay maintainers — share these ideas as a starting point, not a prescription
+4. **Test any proposed smithay changes** across both cosmic-comp and Niri before merging, since they have different leak patterns
 
 ## Related Issues and PRs
 
@@ -313,15 +303,15 @@ Neither `Workspace::refresh()` nor `WorkspaceSet::refresh()` retains minimized_w
 
 ## Merging Upstream
 
-### Quick path (cosmic-comp only — what we have now)
+### Immediate: cosmic-comp fix (what we have now)
 
 1. Merge the [cosmic-comp fix](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:fix_vram_leak) — stops the VRAM leak by clearing stale refs, also fixes shader cache and activation token leaks
-2. Works, tested, proven — but is a compositor-specific band-aid
+2. Works, tested, proven — fixes the specific reference cycle in cosmic-comp
 
-### Proper solution (needs maintainer coordination)
+### Longer-term: upstream coordination
 
-3. Propose `resource_map` API change to smithay maintainers — makes VRAM leaks structurally impossible for ALL smithay-based compositors
-4. Coordinate with cmeissl (already working on [PR #1921](https://github.com/Smithay/smithay/pull/1921)) — the approaches are complementary
+3. Coordinate with cmeissl (already working on [PR #1921](https://github.com/Smithay/smithay/pull/1921)) — his defensive API changes prevent compositors from accidentally holding dead surface references
+4. Discuss the structural `data_map` issue with smithay maintainers — see [Draft Ideas for a Smithay-Level Solution](#draft-ideas-for-a-smithay-level-solution) for possible directions, all of which need maintainer input and cross-compositor testing
 5. Our smithay workaround (clearing `MultiTextureInternal` in destruction hook) is NOT recommended for merge — it breaks animations, but it proved the theory
 
 ## Test Environment
