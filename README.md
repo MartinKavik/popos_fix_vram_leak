@@ -21,13 +21,13 @@ I have two working fixes for the VRAM leak, both tested with zero leakage:
 
 1. **`weak_window` branches (recommended):** Stores `Weak` references in `ToplevelHandleState` instead of strong `Arc` clones. Makes the leak structurally impossible — no explicit cleanup needed. Requires a small smithay change (`WeakWindow` type). See [Structural Fix: WeakWindow](#structural-fix-weakwindow-tested-no-leak).
 
-2. **`fix_vram_leak` branches (quick fix):** Explicitly sets `handle_state.window = None` on window removal. Also fixes shader cache and activation token leaks. Pure cosmic-comp change, no smithay changes needed.
+2. **`fix_vram_leak` branch (quick fix):** Explicitly sets `handle_state.window = None` on window removal. Also fixes shader cache and activation token leaks. Pure cosmic-comp change, no smithay changes needed.
 
 Both approaches are proven and tested. The `weak_window` approach is architecturally cleaner; the `fix_vram_leak` approach is simpler to merge since it doesn't touch smithay.
 
 ### 1. VRAM Leak — ToplevelHandleState.window never cleared (cosmic-comp)
 
-**This is the main fix.** When a window is destroyed, cosmic-comp's `remove_toplevel()` sends `closed` events to protocol clients and removes the window from its `toplevels` Vec, but never clears the `window: Option<CosmicSurface>` field in each `ZcosmicToplevelHandleV1` handle's user data (`ToplevelHandleState`).
+**Root cause of the VRAM leak.** When a window is destroyed, cosmic-comp's `remove_toplevel()` sends `closed` events to protocol clients and removes the window from its `toplevels` Vec, but never clears the `window: Option<CosmicSurface>` field in each `ZcosmicToplevelHandleV1` handle's user data (`ToplevelHandleState`).
 
 Protocol handle objects persist until the **client** explicitly destroys them. Long-running clients (cosmic-panel, cosmic-workspaces — and even cosmic-term itself, which binds to `zcosmic_toplevel_info_v1`) keep handles alive indefinitely. Each handle retains a `CosmicSurface` clone that shares `Arc<WindowInner>`, preventing the inner window from being dropped.
 
@@ -43,7 +43,9 @@ ZcosmicToplevelHandleV1 (protocol object, alive until client destroys it)
               -> Arc<Mutex<MultiTextureInternal>> alive -> GPU textures trapped
 ```
 
-**Fix:** Set `handle_state.window = None` in both `remove_toplevel()` and `refresh()` (dead-window safety-net path) in `src/wayland/protocols/toplevel_info.rs`. This drops the `CosmicSurface` clone immediately, allowing `Arc<WindowInner>` refcount to reach 0, which drops all `WlSurface` handles, which drops `SurfaceUserData` and its `data_map`, which drops `MultiTextureInternal` and frees GPU textures.
+**Quick fix (`fix_vram_leak` branch):** Set `handle_state.window = None` in both `remove_toplevel()` and `refresh()` (dead-window safety-net path) in `src/wayland/protocols/toplevel_info.rs`. This drops the `CosmicSurface` clone immediately, allowing `Arc<WindowInner>` refcount to reach 0, which drops all `WlSurface` handles, which drops `SurfaceUserData` and its `data_map`, which drops `MultiTextureInternal` and frees GPU textures.
+
+**Recommended fix (`weak_window` branches):** Store `Weak` references instead of strong clones — see [Structural Fix: WeakWindow](#structural-fix-weakwindow-tested-no-leak).
 
 **Impact:** ~4.8 MB VRAM leaked per cosmic-term window (~97 MB per 20-window cycle). With the fix, VRAM stays flat.
 
@@ -77,7 +79,7 @@ Shadow, Indicator, and Backdrop pixel shader elements are cached per-window in t
 
 I also investigated and confirmed the leak from the smithay side.
 
-**Our workaround:** Commit [`035e3c4`](https://github.com/MartinKavik/smithay/commit/035e3c4736a1fc4cc7fee5a184cd8fe54a4cdcfc) clears `MultiTextureInternal.textures` in the surface destruction hook in `src/backend/renderer/utils/wayland.rs`. Made `MultiTextureInternal` `pub(crate)`, added a `clear_textures()` method, and introduced a `MultiTextureUserData` type alias for the `Arc<Mutex<MultiTextureInternal>>`.
+**My workaround:** Commit [`035e3c4`](https://github.com/MartinKavik/smithay/commit/035e3c4736a1fc4cc7fee5a184cd8fe54a4cdcfc) clears `MultiTextureInternal.textures` in the surface destruction hook in `src/backend/renderer/utils/wayland.rs`. Made `MultiTextureInternal` `pub(crate)`, added a `clear_textures()` method, and introduced a `MultiTextureUserData` type alias for the `Arc<Mutex<MultiTextureInternal>>`.
 
 **Result:** VRAM leak is resolved in nvidia-smi when smithay is patched this way — confirms that the VRAM is trapped in `MultiTextureInternal` inside the surface's `data_map`.
 
@@ -86,7 +88,7 @@ I also investigated and confirmed the leak from the smithay side.
 - **Doesn't fix the root cause** — stale `Arc` references in cosmic-comp still prevent `WindowInner` from being dropped, so other resources (shader caches, activation tokens, `RendererSurfaceState`) continue to leak
 - The smithay-side fix is treating the symptom (trapped textures), not the disease (stale references)
 
-**Takeaway:** This workaround proves the VRAM is trapped in `MultiTextureInternal` inside `SurfaceUserData.data_map`, reachable through the stale `WlSurface` handle chain. The cosmic-comp fix (clearing `ToplevelHandleState.window`) is the correct approach because it eliminates the stale reference itself, allowing the entire chain to be dropped naturally.
+**Takeaway:** This workaround proves the VRAM is trapped in `MultiTextureInternal` inside `SurfaceUserData.data_map`, reachable through the stale `WlSurface` handle chain. The recommended fix is [WeakWindow](#structural-fix-weakwindow-tested-no-leak) — it eliminates the stale reference structurally, allowing the entire chain to be dropped naturally.
 
 ## Upstream Status & Cross-Compositor Context
 
@@ -102,7 +104,7 @@ The root cause spans two layers:
 
 ### Affected compositors
 
-- **Cosmic** — affected (our fix: [cosmic-comp @ fix_vram_leak](https://github.com/MartinKavik/cosmic-comp/tree/fix_vram_leak))
+- **Cosmic** — affected (my fix: [cosmic-comp @ weak_window](https://github.com/MartinKavik/cosmic-comp/tree/weak_window), also [@ fix_vram_leak](https://github.com/MartinKavik/cosmic-comp/tree/fix_vram_leak))
 - **Niri** — affected, fixed via [YaLTeR/niri#3404](https://github.com/YaLTeR/niri/pull/3404) (merged)
 - **River, Hyprland, Sway** — NOT affected (not Smithay-based)
 - Confirmed on both AMD and NVIDIA GPUs
@@ -337,7 +339,7 @@ Neither `Workspace::refresh()` nor `WorkspaceSet::refresh()` retains minimized_w
 ### Upstream coordination
 
 - Coordinate with cmeissl (already working on [PR #1921](https://github.com/Smithay/smithay/pull/1921)) — his defensive API changes prevent compositors from accidentally holding dead surface references, complementary to the `WeakWindow` fix
-- Our smithay workaround branch (`fix_vram_leak`) that clears `MultiTextureInternal` in the destruction hook is NOT recommended for merge — it breaks animations, but it proved the theory
+- My smithay workaround branch (`fix_vram_leak`) that clears `MultiTextureInternal` in the destruction hook is NOT recommended for merge — it breaks animations, but it proved the theory
 
 ## Test Environment
 
