@@ -163,8 +163,8 @@ impl WeakWindow {
 | File | Change |
 |---|---|
 | `src/shell/element/surface.rs` | Add `WeakCosmicSurface` wrapping `WeakWindow`, add `CosmicSurface::downgrade()` |
-| `src/wayland/protocols/toplevel_info.rs` | Add `WindowWeak` trait and `Window::Weak` associated type; change `ToplevelHandleStateInner.window` from `Option<W>` to `Option<W::Weak>`; store `window.downgrade()` in `from_window()`; use `weak.upgrade()` in `window_from_handle()` |
-| `src/wayland/handlers/toplevel_info.rs` | Implement `Window::Weak` and `WindowWeak` for `CosmicSurface`/`WeakCosmicSurface` |
+| `src/wayland/protocols/toplevel_info.rs` | Add `Window::Weak` associated type and `Window::upgrade()` static method; change `ToplevelHandleStateInner.window` from `Option<W>` to `Option<W::Weak>`; store `window.downgrade()` in `from_window()`; use `W::upgrade()` in `window_from_handle()` |
+| `src/wayland/handlers/toplevel_info.rs` | Implement `Window::Weak`, `Window::downgrade()` and `Window::upgrade()` for `CosmicSurface`/`WeakCosmicSurface` |
 
 The key change is one line in `ToplevelHandleStateInner`:
 ```rust
