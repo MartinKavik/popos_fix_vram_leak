@@ -6,14 +6,24 @@ Fixes a VRAM leak in the COSMIC compositor where GPU texture memory is never rec
 
 ## Forked Repositories
 
+- **cosmic-comp:** [github.com/MartinKavik/cosmic-comp @ weak_window](https://github.com/MartinKavik/cosmic-comp/tree/weak_window) — [diff vs upstream master](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:weak_window)
+  Structural fix: stores `Weak` references in `ToplevelHandleState`, making the VRAM leak impossible
 - **cosmic-comp:** [github.com/MartinKavik/cosmic-comp @ fix_vram_leak](https://github.com/MartinKavik/cosmic-comp/tree/fix_vram_leak) — [diff vs upstream master](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:fix_vram_leak)
-  Working quick fix: 3 leaks addressed (VRAM + shader cache + activation tokens)
+  Quick fix: explicitly clears stale references + fixes shader cache and activation token leaks
+- **smithay:** [github.com/MartinKavik/smithay @ weak_window](https://github.com/MartinKavik/smithay/tree/weak_window) — [diff vs upstream master](https://github.com/Smithay/smithay/compare/master...MartinKavik:smithay:weak_window)
+  Adds `WeakWindow` type — enables compositors to hold weak references to windows
 - **smithay:** [github.com/MartinKavik/smithay @ fix_vram_leak](https://github.com/MartinKavik/smithay/tree/fix_vram_leak) — [diff vs upstream master](https://github.com/Smithay/smithay/compare/master...MartinKavik:smithay:fix_vram_leak)
-  Workaround that confirmed the theory (clears `MultiTextureInternal` on surface destroy; breaks window closing animations, doesn't resolve stale Arc references — not for production merge)
+  Workaround that confirmed the theory (clears `MultiTextureInternal` on surface destroy; breaks window closing animations — not for production merge)
 
 ## Overview
 
-Our cosmic-comp fix is a **proven, tested solution** that stops the VRAM leak by clearing the specific stale reference (`ToplevelHandleState.window`) at the compositor level. A longer-term smithay-level solution to prevent this class of leak structurally is worth exploring, but any such API change would need to be designed with smithay and cosmic-comp maintainers — see [Draft Ideas for a Smithay-Level Solution](#draft-ideas-for-a-smithay-level-solution) for possible directions and open questions.
+I have two working fixes for the VRAM leak, both tested with zero leakage:
+
+1. **`weak_window` branches (recommended):** Stores `Weak` references in `ToplevelHandleState` instead of strong `Arc` clones. Makes the leak structurally impossible — no explicit cleanup needed. Requires a small smithay change (`WeakWindow` type). See [Structural Fix: WeakWindow](#structural-fix-weakwindow-tested-no-leak).
+
+2. **`fix_vram_leak` branches (quick fix):** Explicitly sets `handle_state.window = None` on window removal. Also fixes shader cache and activation token leaks. Pure cosmic-comp change, no smithay changes needed.
+
+Both approaches are proven and tested. The `weak_window` approach is architecturally cleaner; the `fix_vram_leak` approach is simpler to merge since it doesn't touch smithay.
 
 ### 1. VRAM Leak — ToplevelHandleState.window never cleared (cosmic-comp)
 
@@ -65,7 +75,7 @@ Shadow, Indicator, and Backdrop pixel shader elements are cached per-window in t
 
 ## Smithay-Side Investigation
 
-We also investigated and confirmed the leak from the smithay side.
+I also investigated and confirmed the leak from the smithay side.
 
 **Our workaround:** Commit [`035e3c4`](https://github.com/MartinKavik/smithay/commit/035e3c4736a1fc4cc7fee5a184cd8fe54a4cdcfc) clears `MultiTextureInternal.textures` in the surface destruction hook in `src/backend/renderer/utils/wayland.rs`. Made `MultiTextureInternal` `pub(crate)`, added a `clear_textures()` method, and introduced a `MultiTextureUserData` type alias for the `Arc<Mutex<MultiTextureInternal>>`.
 
@@ -103,190 +113,83 @@ The root cause spans two layers:
 - [Smithay PR #1924](https://github.com/Smithay/smithay/pull/1924) (OPEN) — documents undefined destruction order for client disconnects
 - [Niri PR #3404](https://github.com/YaLTeR/niri/pull/3404) (MERGED) — fixes Niri's variant by preventing dead surface hook installation
 
-## Draft Ideas for a Smithay-Level Solution
+## Structural Fix: WeakWindow (Tested, No Leak)
 
-> **Status: Draft — needs discussion with smithay and cosmic-comp maintainers before any implementation.**
+> **Status: Implemented and tested — no VRAM leak observed. Needs confirmation from cosmic-comp maintainers.**
 >
-> The ideas below are untested proposals. A proper solution would need to be designed collaboratively with cmeissl (who is already working on related fixes in [PR #1921](https://github.com/Smithay/smithay/pull/1921)) and the cosmic-comp team, then validated with real-world testing across compositors. Our cosmic-comp fix (clearing `ToplevelHandleState.window`) is the proven, working solution for now.
+> This approach was suggested by cmeissl in [his comment on Smithay #1562](https://github.com/Smithay/smithay/issues/1562#issuecomment-3864200389), where he identified the reference cycle and recommended using `Weak` references. I explored several other approaches first (RAII guards with retained flags, Arc::strong_count checks, explicit texture clearing in destruction hooks) but weak references turned out to be the cleanest solution — minimal code, no explicit cleanup, structurally prevents the leak.
 
-### The structural problem
+### The problem
 
-GPU resources (`MultiTextureInternal`, `RendererSurfaceState`) are stored in `SurfaceData.data_map`, which is an append-only `UserDataMap` (lock-free linked list, no `clear()` or `remove()`) tied to handle lifetime. This means:
+`ToplevelHandleState` stores a strong `CosmicSurface` reference (which wraps `Arc<WindowInner>`). Wayland protocol handles (`ZcosmicToplevelHandleV1`) persist until the **client** explicitly destroys them — even after the compositor sends a `closed` event. This creates a reference cycle: the protocol handle keeps `Arc<WindowInner>` alive, which keeps `WlSurface` handles alive, which keeps `SurfaceUserData` and its `data_map` alive, which traps `MultiTextureInternal` and its GPU textures in VRAM.
 
-- **Current behavior:** GPU resource lifetime = max(all `WlSurface` handle lifetimes)
-- **Correct behavior:** GPU resource lifetime = surface protocol lifetime (ended by client destroy/disconnect)
+The [cosmic-comp `fix_vram_leak` branch](https://github.com/MartinKavik/cosmic-comp/tree/fix_vram_leak) fixes this by explicitly setting `handle_state.window = None` on window removal. This works, but requires remembering to clear the reference at the right time. The `WeakWindow` approach makes the leak **structurally impossible** — no explicit cleanup needed.
 
-Each compositor has hit this differently — cosmic-comp via a reference cycle in `ToplevelHandleState`, Niri via dead surface hook insertion — but the underlying storage design makes this class of bug easy to introduce and hard to prevent.
+### The fix: store `Weak` instead of strong references
 
-### The timing dilemma
+Since `Window` is `Arc<WindowInner>`, we can store `Weak<WindowInner>` in the protocol handle's user data. When the compositor drops its last strong reference to a window, the weak reference becomes invalid automatically, and the entire resource chain is freed.
 
-Clearing textures immediately on surface destruction (in `PrivateSurfaceData::cleanup()`) breaks window closing animations — the compositor needs to render fade-out frames from those textures. But if textures aren't cleared in the destruction hook, stale `WlSurface` handles keep `data_map` alive and GPU textures are trapped forever.
+**Branches:**
+- **smithay:** [MartinKavik/smithay @ weak_window](https://github.com/MartinKavik/smithay/tree/weak_window) — [diff vs upstream master](https://github.com/Smithay/smithay/compare/master...MartinKavik:smithay:weak_window)
+- **cosmic-comp:** [MartinKavik/cosmic-comp @ weak_window](https://github.com/MartinKavik/cosmic-comp/tree/weak_window) — [diff vs upstream master](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:weak_window)
 
-Note: upstream smithay already clears `RendererSurfaceState` textures in the destruction hook via `state.reset()`. This doesn't break cosmic-comp's animations because its multi-GPU rendering path reads from `MultiTextureInternal`, not `RendererSurfaceState` directly. It's the multi-GPU textures that need clearing without breaking animations.
+### Changes
 
-### What needs protecting — not just textures
+**Smithay** (1 file):
 
-`MultiTextureInternal` bundles more than just GPU textures. Its `GpuSingleTexture` variants hold:
-
-- **GPU textures** (`Box<dyn Any>`) — VRAM
-- **DMA-buf handles** (`Dmabuf`) — kernel-level buffer objects (in `Dma` and `Mem` variants)
-- **DRM sync points** (`SyncPoint`) — GPU synchronization primitives
-- **Shadow buffers** for cross-GPU rendering (`external_shadow` in `Mem` variant)
-
-All of these are trapped when `MultiTextureInternal` stays alive in `data_map`. A solution needs to cover all of them, not just textures.
-
-### Proposed approach: `SurfaceRenderGuard` with compile-time safety
-
-**Core idea:** `MultiTextureInternal` is already behind `Arc<Mutex<>>` in `data_map`. Add a retained/guard mechanism so the destruction hook cooperates with compositors that need resources for closing animations.
-
-When a compositor is about to animate a window closing, it calls `retain_surface_render_resources()` to get a `SurfaceRenderGuard`. The guard holds a clone of the `Arc<Mutex<MultiTextureInternal>>` and sets a `retained` flag. The destruction hook checks this flag — if retained, it skips clearing (the guard will clear on drop). If not retained, it clears immediately.
+| File | Change |
+|---|---|
+| `src/desktop/wayland/window.rs` | Add `WeakWindow` type wrapping `Weak<WindowInner>`, add `Window::downgrade()` method |
 
 ```rust
-// Conceptual sketch — NOT a concrete proposal
-
-// Smithay provides:
-
-/// Keeps a destroyed surface's GPU resources alive for closing animations.
-/// Resources freed on drop. Not Clone — single owner enforced.
-#[must_use = "dropping the guard immediately frees GPU resources — \
-              store it for the duration of closing animations"]
-pub struct SurfaceRenderGuard {
-    resources: Arc<Mutex<MultiTextureInternal>>,
-}
-
-impl Drop for SurfaceRenderGuard {
-    fn drop(&mut self) {
-        // Clear GPU textures, DMA-bufs, sync points, shadow buffers
-        self.resources.lock().unwrap().clear_textures();
+impl Window {
+    pub fn downgrade(&self) -> WeakWindow {
+        WeakWindow(Arc::downgrade(&self.0))
     }
 }
-// NOT Clone, NOT Copy — deliberate. Single owner, single lifetime.
 
-/// Retain a surface's GPU resources for use after surface destruction.
-/// Call before surface destruction if you need resources for closing animations.
-#[must_use]
-pub fn retain_surface_render_resources(
-    surface: &WlSurface,
-) -> Option<SurfaceRenderGuard> { ... }
-```
+#[derive(Debug, Clone)]
+pub struct WeakWindow(Weak<WindowInner>);
 
-The destruction hook becomes:
-
-```rust
-// In the destruction hook (smithay-internal):
-if let Some(mti) = data.data_map.get::<MultiTextureUserData>() {
-    let guard = mti.lock().unwrap();
-    if !guard.retained.load(Ordering::Acquire) {
-        guard.clear_textures();  // no animation → free immediately
+impl WeakWindow {
+    pub fn upgrade(&self) -> Option<Window> {
+        self.0.upgrade().map(Window)
     }
-    // if retained → SurfaceRenderGuard will clear on drop
 }
 ```
 
-**How cosmic-comp would use it:**
+**Cosmic-comp** (3 files):
 
-In `unmap_surface()`, where closing animations are set up, the compositor retains the resources before the surface can be destroyed:
+| File | Change |
+|---|---|
+| `src/shell/element/surface.rs` | Add `WeakCosmicSurface` wrapping `WeakWindow`, add `CosmicSurface::downgrade()` |
+| `src/wayland/protocols/toplevel_info.rs` | Add `WindowWeak` trait and `Window::Weak` associated type; change `ToplevelHandleStateInner.window` from `Option<W>` to `Option<W::Weak>`; store `window.downgrade()` in `from_window()`; use `weak.upgrade()` in `window_from_handle()` |
+| `src/wayland/handlers/toplevel_info.rs` | Implement `Window::Weak` and `WindowWeak` for `CosmicSurface`/`WeakCosmicSurface` |
 
+The key change is one line in `ToplevelHandleStateInner`:
 ```rust
-// In unmap_surface() — grab resources before destruction can fire:
-let render_guard = retain_surface_render_resources(surface.wl_surface());
-// ... pass to animation data structure ...
+// Before: strong reference keeps WindowInner alive
+window: Option<W>,
+
+// After: weak reference allows WindowInner to be dropped
+window: Option<W::Weak>,
 ```
 
-The guard is stored in the animation data structures — tiling's `TreeQueue` and floating's `Animation`. When the animation finishes and its data structure is dropped, the guard drops with it, and resources are freed automatically.
+### Why this is better than explicit `None`-setting
 
-```rust
-// TilingLayout — old tree entries require a guard:
-struct OldTreeEntry {
-    tree: Tree<Data>,
-    duration: Duration,
-    blocker: Option<TilingBlocker>,
-    render_guards: Vec<SurfaceRenderGuard>,  // dropped when animation ends
-}
-
-// FloatingLayout — minimize animation requires a guard:
-enum Animation {
-    Minimize {
-        start: Instant,
-        previous_geometry: Rectangle<i32, Local>,
-        target_geometry: Rectangle<i32, Local>,
-        render_guard: SurfaceRenderGuard,  // dropped when animation ends
-    },
-    // ...
-}
-```
-
-Rendering code doesn't change — `render_old_tree_windows()` keeps rendering the live surface as before. The guard just ensures the textures exist while it does. When the animation's data structure is cleaned up, the guard goes out of scope, `Drop` fires, and GPU resources are freed. No explicit cleanup code.
-
-### Compile-time safety — preventing the reverse bug
-
-Solving a memory leak is pointless if the fix introduces silent animation breakage. The guard pattern provides three layers of defense against forgetting:
-
-**Layer 1: Compiler error (cosmic-comp).** Animation data structures require a `SurfaceRenderGuard` field, not `Option<SurfaceRenderGuard>`. If someone creates a closing animation without providing a guard, **it won't compile**:
-
-```rust
-// This won't compile — render_guard field is required:
-Animation::Minimize {
-    start: Instant::now(),
-    previous_geometry: geo,
-    target_geometry: target,
-    // error: missing field `render_guard`
-}
-```
-
-**Layer 2: Compiler warning (smithay).** `#[must_use]` on both `SurfaceRenderGuard` and `retain_surface_render_resources()`. If you call retain but don't store the result, the compiler warns.
-
-**Layer 3: Visible failure (runtime).** If resources are freed too early despite the above, the surface becomes invisible during the animation (textures return `None`). This is immediately obvious during development — a visual glitch, never a silent or accumulating problem.
-
-| Layer | Catches | How |
+| | Explicit `None` (`fix_vram_leak`) | `WeakWindow` (`weak_window`) |
 |---|---|---|
-| Compiler error (cosmic-comp) | Forgetting guard when creating animation | Required field in animation struct |
-| Compiler warning (smithay) | Calling `retain` but not storing result | `#[must_use]` on guard and function |
-| Visible failure (runtime) | Any remaining edge case | Window vanishes instead of fading — obvious, never silent |
+| **Leak prevention** | Must remember to clear at the right time | Structural — impossible to leak via this path |
+| **New code adding handles** | Could introduce the same bug | Automatically safe — weak refs can't keep resources alive |
+| **Cleanup code needed** | Yes (`handle_state.window = None`) | No — dropping the last strong ref is enough |
+| **Smithay changes** | None | 1 file (add `WeakWindow` type) |
+| **Risk** | Low — proven fix | Low — standard `Arc`/`Weak` pattern |
 
-The failure mode is always **visible and harmless** (broken animation caught during development) rather than **invisible and accumulating** (VRAM leak discovered after months).
+### Relationship to other fixes
 
-### Why this pattern over alternatives
-
-The `SurfaceRenderGuard` follows Rust's RAII pattern (like `MutexGuard`): acquire a resource, compiler tracks ownership, release on drop. Compared to other approaches:
-
-- **Timer/deferred cleanup** — relies on guessing a "long enough" delay. Incorrect delay either leaks temporarily (too long) or breaks animations (too short). No compile-time guarantees.
-- **Separate `resource_map` on `SurfaceData`** — same timing dilemma (when to clear it), adds a mutex to the hot render path, and introduces a fuzzy GPU-vs-metadata boundary for developers.
-- **Full ownership inversion** (renderer-owned `HashMap` with `Weak` refs in `data_map`) — architecturally cleanest but a large refactor that changes every texture lookup across the render pipeline. The guard approach achieves the same safety with minimal changes — `MultiTextureInternal` stays in `data_map`, only the cleanup mechanism changes.
-
-### Concrete changes required
-
-**Smithay** (4 changes):
-
-| File | Change |
-|---|---|
-| `src/backend/renderer/multigpu/mod.rs` | New `SurfaceRenderGuard` type (not `Clone`, `#[must_use]`), add `retained: AtomicBool` field to `MultiTextureInternal` |
-| `src/backend/renderer/utils/wayland.rs` | New `retain_surface_render_resources()` public function |
-| `src/backend/renderer/utils/wayland.rs` | Destruction hook checks `retained` flag before clearing |
-| No other files | `UserDataMap`, `AppendList`, `CompositorHandler`, render path — all unchanged |
-
-**Cosmic-comp** (3 changes):
-
-| File | Change |
-|---|---|
-| `src/shell/mod.rs` | Call `retain_surface_render_resources()` in `unmap_surface()` |
-| `src/shell/layout/tiling/mod.rs` | Store `Vec<SurfaceRenderGuard>` in `TreeQueue` old tree entries |
-| `src/shell/layout/floating/mod.rs` | Store `SurfaceRenderGuard` in `Animation::Minimize` |
-
-Normal rendering, `import_surface_tree()`, and all other compositor code stays unchanged. The existing cosmic-comp VRAM fix (`ToplevelHandleState.window = None`) remains good practice for CPU RAM correctness.
-
-### Other directions worth noting
-
-- **cmeissl's defensive API approach ([PR #1921](https://github.com/Smithay/smithay/pull/1921)):** Returns `Result<_, DeadResource>` from `add_pre_commit_hook()` etc. Already in progress, prevents Niri's leak variant. Complements the guard approach — prevents bugs at the compositor API boundary, while the guard handles cleanup at the GPU resource level.
-
-- **wayland-server handle lifetime changes:** If wayland-server dropped `SurfaceUserData` at protocol-level surface destruction regardless of outstanding Rust handles, the entire problem disappears. This is a wayland-rs change, not a smithay change, and would be the most fundamental fix.
-
-### What we recommend
-
-1. **Merge compositor-level fixes immediately** — our cosmic-comp fix is proven and tested, Niri's fix is already merged
-2. **Coordinate with cmeissl on smithay-level improvements** — his PR #1921 and documentation work (PR #1924) are the right foundation
-3. **Discuss the `SurfaceRenderGuard` approach with smithay maintainers** — minimal smithay changes (4 touchpoints), compile-time safety for compositors, and eliminates the timing dilemma between "leak forever" and "break animations"
-4. **Test any proposed smithay changes** across both cosmic-comp and Niri before merging, since they have different leak patterns
+- The `WeakWindow` approach replaces the need for explicit `window = None` cleanup in `remove_toplevel()` for the VRAM leak. The shader cache and activation token fixes from the [`fix_vram_leak` branch](https://github.com/MartinKavik/cosmic-comp/tree/fix_vram_leak) are separate issues and still needed.
+- cmeissl's [PR #1921](https://github.com/Smithay/smithay/pull/1921) (preventing hooks on destroyed surfaces) addresses a different leak variant (Niri's). Both fixes are complementary.
+- The smithay workaround branch ([`fix_vram_leak`](https://github.com/MartinKavik/smithay/tree/fix_vram_leak)) that clears `MultiTextureInternal` in the destruction hook is NOT needed with this approach and is not recommended for merge (it breaks closing animations).
 
 ## Related Issues and PRs
 
@@ -323,7 +226,7 @@ Normal rendering, `import_surface_tree()`, and all other compositor code stays u
 | [#1591](https://github.com/pop-os/cosmic-epoch/issues/1591) | cosmic-comp VRAM growing | OPEN | Same issue as cosmic-comp #1179 |
 | [#2122](https://github.com/pop-os/cosmic-epoch/issues/2122) | Memory increasing over time | OPEN | Likely partly caused by shader cache + activation token leaks |
 
-## How We Diagnosed the Leak
+## How I Diagnosed the Leak
 
 The VRAM leak was diagnosed through a systematic elimination process, narrowing from "something holds WlSurface handles" to the exact leaking clone of `Arc<WindowInner>`.
 
@@ -420,16 +323,21 @@ Neither `Workspace::refresh()` nor `WorkspaceSet::refresh()` retains minimized_w
 
 ## Merging Upstream
 
-### Immediate: cosmic-comp fix (what we have now)
+### Recommended: WeakWindow approach
 
-1. Merge the [cosmic-comp fix](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:fix_vram_leak) — stops the VRAM leak by clearing stale refs, also fixes shader cache and activation token leaks
-2. Works, tested, proven — fixes the specific reference cycle in cosmic-comp
+1. Merge [smithay @ weak_window](https://github.com/Smithay/smithay/compare/master...MartinKavik:smithay:weak_window) — adds `WeakWindow` type (1 file, ~25 lines)
+2. Merge [cosmic-comp @ weak_window](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:weak_window) — stores weak references in `ToplevelHandleState` (3 files)
+3. Also merge the shader cache and activation token fixes from [cosmic-comp @ fix_vram_leak](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:fix_vram_leak) — these are separate leaks not addressed by `WeakWindow`
 
-### Longer-term: upstream coordination
+### Alternative: quick fix only (no smithay changes)
 
-3. Coordinate with cmeissl (already working on [PR #1921](https://github.com/Smithay/smithay/pull/1921)) — his defensive API changes prevent compositors from accidentally holding dead surface references
-4. Discuss the structural `data_map` issue with smithay maintainers — see [Draft Ideas for a Smithay-Level Solution](#draft-ideas-for-a-smithay-level-solution) for possible directions, all of which need maintainer input and cross-compositor testing
-5. Our smithay workaround (clearing `MultiTextureInternal` in destruction hook) is NOT recommended for merge — it breaks animations, but it proved the theory
+1. Merge [cosmic-comp @ fix_vram_leak](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:fix_vram_leak) — explicitly clears stale refs + fixes shader cache and activation token leaks
+2. This is proven and tested but requires remembering to clear references when adding new handle types in the future
+
+### Upstream coordination
+
+- Coordinate with cmeissl (already working on [PR #1921](https://github.com/Smithay/smithay/pull/1921)) — his defensive API changes prevent compositors from accidentally holding dead surface references, complementary to the `WeakWindow` fix
+- Our smithay workaround branch (`fix_vram_leak`) that clears `MultiTextureInternal` in the destruction hook is NOT recommended for merge — it breaks animations, but it proved the theory
 
 ## Test Environment
 
