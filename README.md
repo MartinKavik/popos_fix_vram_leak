@@ -228,6 +228,13 @@ window: Option<W::Weak>,
 | [#1591](https://github.com/pop-os/cosmic-epoch/issues/1591) | cosmic-comp VRAM growing | OPEN | Same issue as cosmic-comp #1179 |
 | [#2122](https://github.com/pop-os/cosmic-epoch/issues/2122) | Memory increasing over time | OPEN | Likely partly caused by shader cache + activation token leaks |
 
+### Other reported leaks (not investigated in this report)
+
+| Issue | Title | Status | Notes |
+|---|---|---|---|
+| [#2073](https://github.com/pop-os/cosmic-comp/issues/2073) | Minimize-applet screencopy memfd buffers never freed | OPEN | Screencopy `memfd` shared memory buffers leak ~370/hour during normal use. 16+ GB Shmem observed. Different mechanism — buffer lifecycle, not window references. Workaround: disable "Minimized windows" applet |
+| [#2080](https://github.com/pop-os/cosmic-comp/issues/2080) | Memory leak when running OBS | OPEN | cosmic-comp accumulates RAM while OBS screen-captures. Likely same screencopy buffer issue as #2073 but triggered by OBS. Linked to [Smithay #1925](https://github.com/Smithay/smithay/issues/1925) |
+
 ## How I Diagnosed the Leak
 
 The VRAM leak was diagnosed through a systematic elimination process, narrowing from "something holds WlSurface handles" to the exact leaking clone of `Arc<WindowInner>`.
