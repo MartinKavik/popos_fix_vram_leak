@@ -303,9 +303,23 @@ Added `handle_state.lock().unwrap().window = None` in both `remove_toplevel()` a
 
 Verification: `Arc::strong_count()` dropped from 3 to 2, then to 1 (only the diagnostic clone), then `WindowInner` DROPPED message confirmed full cleanup. VRAM stays flat.
 
-## Known Remaining Bugs (not causing VRAM leaks, but should be fixed)
+## Potential Remaining Leaks (not yet tested/measured)
 
-### Bug: Workspace::unmap_surface() only checks Fullscreen minimized
+These bugs likely cause VRAM leaks via the same reference chain as the main leak, but through `minimized_windows` storage instead of `ToplevelHandleState`. The leak is triggered when windows are closed or killed **while minimized** (not during normal visible-window close). Unlike the main VRAM leak, these haven't been tested with nvidia-smi or measured — the VRAM impact is based on code analysis of the reference chain. To test: minimize N windows, `killall` the app processes, check nvidia-smi.
+
+**Probable VRAM leak chain (same as main leak, different entry point):**
+```
+minimized_windows Vec (never cleaned for dead surfaces)
+  -> MinimizedWindow::Floating/Tiling { window: CosmicMapped }
+    -> CosmicSurface -> Window(Arc<WindowInner>)      <- keeps Arc refcount > 0
+      -> ToplevelSurface { wl_surface, shell_surface }
+        -> WlSurface handles alive
+          -> SurfaceUserData alive (wayland-server 0.31.x)
+            -> data_map alive
+              -> Arc<Mutex<MultiTextureInternal>> alive -> GPU textures trapped
+```
+
+### Bug 1: Workspace::unmap_surface() only checks Fullscreen minimized
 **File:** `src/shell/workspace.rs:674`
 
 ```rust
@@ -313,15 +327,93 @@ Verification: `Arc::strong_count()` dropped from 3 to 2, then to 1 (only the dia
 if let MinimizedWindow::Fullscreen { surface: s, .. } = m { s == surface } else { false }
 ```
 
-Floating/Tiling minimized windows at workspace level are never removed on destroy. No `alive()` safety-net exists anywhere for minimized_windows.
+**Full leak path:** `toplevel_destroyed()` → `Shell::unmap_surface()` (`src/shell/mod.rs:2881`) → iterates WorkspaceSets → calls `workspace.unmap_surface()` (`src/shell/workspace.rs:653`) → line 674 only matches `MinimizedWindow::Fullscreen` → Floating/Tiling variants return `false` → falls through to `element_for_surface()` at line 691 which searches floating/tiling layers but NOT `minimized_windows` → returns `None` → dead MinimizedWindow entry stays in Vec forever.
 
-### Bug: WorkspaceSet::refresh() only refreshes active workspace
-**File:** `src/shell/mod.rs:583-606`
+**Proposed fix:** Change the position search at line 674 to check all variants via `active_window()`, then handle all variants in the removal block:
 
-Dead surfaces on non-active workspaces are never cleaned.
+```rust
+if let Some(pos) = self.minimized_windows.iter().position(|m| {
+    &m.active_window() == surface
+}) {
+    let minimized = self.minimized_windows.remove(pos);
+    minimized.active_window().set_minimized(false);
+    return Some((minimized.active_window(), match minimized {
+        MinimizedWindow::Fullscreen { previous, .. } => {
+            WorkspaceRestoreData::Fullscreen(previous)
+        }
+        MinimizedWindow::Floating { previous, .. } => {
+            WorkspaceRestoreData::Floating(Some(previous))
+        }
+        MinimizedWindow::Tiling { previous, .. } => {
+            WorkspaceRestoreData::Tiling(Some(previous))
+        }
+    }));
+}
+```
 
-### Bug: No alive() check for minimized_windows
-Neither `Workspace::refresh()` nor `WorkspaceSet::refresh()` retains minimized_windows by alive().
+### Bug 2: WorkspaceSet::refresh() only refreshes active workspace
+**File:** `src/shell/mod.rs:597-598`
+
+```rust
+self.workspaces[self.active].refresh();  // ONLY active workspace refreshed
+```
+
+`WorkspaceSet::refresh()` only calls `self.workspaces[self.active].refresh()` — non-active workspaces get zero cleanup. Dead fullscreen surfaces AND dead minimized windows on non-active workspaces accumulate forever.
+
+**Proposed fix:** Add a lightweight loop in `WorkspaceSet::refresh()` over non-active workspaces that only calls `workspace.minimized_windows.retain(|m| m.alive())` (avoids full refresh overhead on non-active workspaces):
+
+```rust
+// After the active workspace refresh:
+for (i, workspace) in self.workspaces.iter_mut().enumerate() {
+    if i != self.active {
+        workspace.minimized_windows.retain(|m| m.alive());
+    }
+}
+```
+
+### Bug 3: No alive() check for minimized_windows
+**Files:** `src/shell/workspace.rs:445-449`, `src/shell/mod.rs:578-601`
+
+`Workspace::refresh()` checks `fullscreen` (`take_if`), `floating_layer` (`.refresh()`), and `tiling_layer` (`.refresh()`) — but NOT `minimized_windows`. `WorkspaceSet::refresh()` also doesn't check its own `minimized_windows` (sticky layer). No `impl IsAlive for MinimizedWindow` exists in the codebase.
+
+**Proposed fix (prerequisite for other fixes):**
+
+Add `impl IsAlive for MinimizedWindow` (near existing `impl IsAlive for FullscreenSurface` at `src/shell/workspace.rs:223`):
+
+```rust
+impl IsAlive for MinimizedWindow {
+    fn alive(&self) -> bool {
+        match self {
+            MinimizedWindow::Fullscreen { surface, .. } => surface.alive(),
+            MinimizedWindow::Floating { window, .. } => window.alive(),
+            MinimizedWindow::Tiling { window, .. } => window.alive(),
+        }
+    }
+}
+```
+
+Then add cleanup to `Workspace::refresh()` (`src/shell/workspace.rs:445`):
+
+```rust
+pub fn refresh(&mut self) {
+    self.fullscreen.take_if(|w| !w.alive());
+    self.floating_layer.refresh();
+    self.tiling_layer.refresh();
+    self.minimized_windows.retain(|m| m.alive());  // NEW
+}
+```
+
+### Bug 4: WorkspaceSet.minimized_windows (sticky) has no cleanup
+**File:** `src/shell/mod.rs:362, 578-601`
+
+`WorkspaceSet` has its own `minimized_windows: Vec<MinimizedWindow>` (line 362) for sticky layer minimized windows. This Vec is never checked for dead surfaces — `WorkspaceSet::refresh()` calls `self.sticky_layer.refresh()` but NOT `self.minimized_windows.retain(...)`.
+
+**Proposed fix:** Add to `WorkspaceSet::refresh()`:
+
+```rust
+self.sticky_layer.refresh();
+self.minimized_windows.retain(|m| m.alive());  // NEW: sticky minimized
+```
 
 ## Merging Upstream
 
