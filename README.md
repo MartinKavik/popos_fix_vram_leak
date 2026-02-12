@@ -310,9 +310,47 @@ Added `handle_state.lock().unwrap().window = None` in both `remove_toplevel()` a
 
 Verification: `Arc::strong_count()` dropped from 3 to 2, then to 1 (only the diagnostic clone), then `WindowInner` DROPPED message confirmed full cleanup. VRAM stays flat.
 
-## Potential Remaining Leaks (not yet tested/measured)
+## Confirmed Remaining Leaks
 
-These bugs likely cause VRAM leaks via the same reference chain as the main leak, but through `minimized_windows` storage instead of `ToplevelHandleState`. The leak is triggered when windows are closed or killed **while minimized** (not during normal visible-window close). Unlike the main VRAM leak, these haven't been tested with nvidia-smi or measured — the VRAM impact is based on code analysis of the reference chain. To test: minimize N windows, `killall` the app processes, check nvidia-smi.
+All tests below run on the `weak_window` branch (with the main ToplevelHandleState VRAM leak already fixed). System: NVIDIA RTX 2070, uptime 1 day 7 hours.
+
+### Leak A: Workspace Overview (Super+W) — largest confirmed leak
+
+Opening and closing the workspace overview while windows are open leaks significant VRAM. The leak persists after windows are closed normally.
+
+| | Before | After | Delta |
+|--|--------|-------|-------|
+| cosmic-comp VRAM | 1342 MiB | 1545 MiB | **+203 MiB** |
+| cosmic-workspaces VRAM | 94 MiB | 142 MiB | **+48 MiB** |
+| Total GPU | 3407 MiB | 3736 MiB | **+329 MiB** |
+
+**Test:** Opened 20 cosmic-term windows, pressed Super+W 10 times (5 open/close cycles of the workspace overview), then closed all 20 windows normally. **+203 MiB leaked in cosmic-comp, +48 MiB in cosmic-workspaces.**
+
+**Probable cause:** `cosmic-workspaces` uses `ext_foreign_toplevel_image_capture_source_manager_v1` to create toplevel capture sources for window thumbnails in the overview. On the server side (cosmic-comp), `toplevel_source_created()` stores `ImageCaptureSourceKind::Toplevel(CosmicSurface)` — a strong reference — in the capture source's user data (`src/wayland/handlers/image_capture_source.rs:48`). Additionally, each capture session holds its own `ImageCaptureSource` Arc clone via `SessionInner.source`, and sessions are stored in the `CosmicSurface`'s user_data via `add_session()`, creating a reference cycle:
+
+```
+ImageCaptureSource (Arc)
+  -> UserDataMap -> ImageCaptureSourceKind::Toplevel(CosmicSurface)  [strong ref]
+    -> CosmicSurface (Arc<WindowInner>) -> user_data -> Vec<Session>
+      -> Session -> SessionInner -> source: ImageCaptureSource (Arc clone)  [cycle]
+        -> keeps entire chain alive even after window is destroyed
+          -> WlSurface handles alive -> SurfaceUserData -> data_map -> GPU textures trapped
+```
+
+**This is likely the biggest VRAM leak for typical usage** — workspace overview is used frequently, and each open/close cycle leaks VRAM proportional to the number of visible windows.
+
+### Leak B: Minimized Windows killed while minimized
+
+Killing windows while minimized leaks VRAM through `minimized_windows` storage.
+
+| | Before | After killing 20 minimized windows | Delta |
+|--|--------|-------------------------------------|-------|
+| cosmic-comp VRAM | 1245 MiB | 1342 MiB | **+97 MiB** |
+| Total GPU | 3263 MiB | 3407 MiB | **+144 MiB** |
+
+**Test:** Opened 20 cosmic-term windows, minimized all via title bar, then killed all 20 processes while minimized (`kill <pids>`). **~4.8 MB leaked per window** — identical rate to the original ToplevelHandleState leak, confirming the same `Arc<WindowInner>` → GPU texture chain.
+
+**Additionally**, `ImageCaptureSourceKind::Toplevel(CosmicSurface)` in `src/wayland/protocols/image_capture_source.rs:37` stores a strong `CosmicSurface` clone in the capture source user data. The `cosmic-applet-minimize` (minimized windows dock applet) creates toplevel capture sources for window thumbnails. If these capture source handles outlive the window, they contribute to the same VRAM leak chain. Fixing this would require changing to `WeakCosmicSurface`.
 
 **Probable VRAM leak chain (same as main leak, different entry point):**
 ```
