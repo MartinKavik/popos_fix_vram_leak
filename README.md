@@ -352,6 +352,27 @@ Killing windows while minimized leaks VRAM through `minimized_windows` storage.
 
 **Additionally**, `ImageCaptureSourceKind::Toplevel(CosmicSurface)` in `src/wayland/protocols/image_capture_source.rs:37` stores a strong `CosmicSurface` clone in the capture source user data. The `cosmic-applet-minimize` (minimized windows dock applet) creates toplevel capture sources for window thumbnails. If these capture source handles outlive the window, they contribute to the same VRAM leak chain. Fixing this would require changing to `WeakCosmicSurface`.
 
+**Fix summary (all cosmic-comp, no smithay changes):**
+
+1. Add `impl IsAlive for MinimizedWindow` (prerequisite for all other fixes):
+   - File: `src/shell/workspace.rs` (near existing `impl IsAlive for FullscreenSurface`)
+   - Match all three variants (`Fullscreen`, `Floating`, `Tiling`), delegate to inner `surface`/`window.alive()`
+
+2. Fix `Workspace::unmap_surface()` — only matches `Fullscreen`, skips `Floating`/`Tiling`:
+   - File: `src/shell/workspace.rs:674`
+   - Change position search to use `active_window()` for all variants
+
+3. Add `minimized_windows.retain(|m| m.alive())` to `Workspace::refresh()`:
+   - File: `src/shell/workspace.rs:445`
+
+4. Fix `WorkspaceSet::refresh()` — only refreshes active workspace, dead entries on non-active workspaces accumulate forever:
+   - File: `src/shell/mod.rs:597`
+   - Add loop over non-active workspaces: `workspace.minimized_windows.retain(|m| m.alive())`
+
+5. Add cleanup for `WorkspaceSet.minimized_windows` (sticky layer) which has zero cleanup:
+   - File: `src/shell/mod.rs:362`
+   - Add `self.minimized_windows.retain(|m| m.alive())` to `WorkspaceSet::refresh()`
+
 **Probable VRAM leak chain (same as main leak, different entry point):**
 ```
 minimized_windows Vec (never cleaned for dead surfaces)
