@@ -422,7 +422,6 @@ pub fn refresh(&mut self) {
 - `WorkspaceSet::refresh()` (`src/shell/mod.rs`) — only refreshes active workspace; non-active workspaces need `workspace.minimized_windows.retain(|m| m.alive())` too
 - `WorkspaceSet.minimized_windows` (sticky layer, `src/shell/mod.rs`) — has its own Vec with zero cleanup
 - `Workspace::unmap_surface()` (`src/shell/workspace.rs`) — only matches `MinimizedWindow::Fullscreen`, skips `Floating`/`Tiling` variants; should use `active_window()` to match all variants
-```
 
 ## Merging Upstream
 
