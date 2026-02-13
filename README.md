@@ -352,20 +352,20 @@ Three changes are required together:
    - File: `src/wayland/protocols/toplevel_info.rs` — call `stop_all_capture_sessions(toplevel.user_data())` in `remove_toplevel()` (before `self.toplevels.retain()`) and in `refresh()` (in the `!window.alive()` branch)
    - Needed because with `WeakCosmicSurface`, the `session_destroyed` callback can't `upgrade()` the weak ref after the surface is dropped, so `remove_session()` never runs. Explicitly draining sessions triggers `Session::drop()`, which fails active frames and releases GPU buffers.
 
-3. **Cherry-pick smithay `mem::forget` fix** (smithay commit [`3d3f9e35`](https://github.com/Smithay/smithay/commit/3d3f9e359352d95cffd1e53287d57df427fcbd34) by Ian Douglas Scott):
+3. **Smithay `mem::forget` fix** (smithay commit [`3d3f9e35`](https://github.com/Smithay/smithay/commit/3d3f9e359352d95cffd1e53287d57df427fcbd34) by Ian Douglas Scott, included in smithay upstream master at rev `599857c`):
    - File: `src/wayland/image_copy_capture/mod.rs`
    - Replaces `std::mem::forget(self)` in `Frame::success()` and `Frame::fail()` with a `completed: bool` flag. Previously, `mem::forget` prevented `Frame::drop()` from running, silently leaking GPU buffers. With this fix, `Frame::drop()` properly fails uncommitted frames and releases resources.
-   - **Important:** This commit is included in smithay upstream master at rev `599857c`, but that rev also contains unrelated changes (`xdg-shell` v7 update, `ext-background-effect-v1` protocol) that cause `wp_viewport` protocol errors, crashing `cosmic-workspaces` at `screencopy.rs:81`. The fix must be cherry-picked onto the base rev (`14a2009`) individually to avoid this breakage.
 
-**Test results (fixed, 4 rounds of 20 windows + 5 Super+W cycles each):**
+**Test results (fixed, 5 rounds of 20 windows + 5 Super+W cycles each, using upstream smithay `599857c`):**
 
-| Round | cosmic-comp | cosmic-workspaces | Notes |
+| Round | cosmic-comp | cosmic-workspaces | Total |
 |-------|------------|-------------------|-------|
-| 0 (baseline) | 32 MiB | 14 MiB | Fresh session |
-| 1 | 231 MiB | 142 MiB | One-time allocation of working set |
-| 2 | 207 MiB | 142 MiB | No growth |
-| 3 | 161 MiB | 142 MiB | No growth |
-| 4 | 248 MiB | 142 MiB | Normal variance, no accumulation |
+| 0 (baseline) | 108 MiB | 86 MiB | 670 MiB |
+| 1 (10 cycles) | 165 MiB | 142 MiB | 883 MiB |
+| 2 | 175 MiB | 142 MiB | 883 MiB |
+| 3 | 248 MiB | 142 MiB | 883 MiB |
+| 4 | 165 MiB | 206 MiB | 947 MiB |
+| 5 | 165 MiB | 142 MiB | 883 MiB |
 
 **Before fix:** cosmic-comp leaked +203 MiB per 5-cycle test, accumulating linearly.
 **After fix:** VRAM fluctuates but does not accumulate across cycles. Leak eliminated.
