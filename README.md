@@ -339,6 +339,37 @@ ImageCaptureSource (Arc)
 
 **This is likely the biggest VRAM leak for typical usage** — workspace overview is used frequently, and each open/close cycle leaks VRAM proportional to the number of visible windows.
 
+**Fix summary (cosmic-comp + smithay):**
+
+Three changes are required together:
+
+1. **Use `WeakCosmicSurface` in `ImageCaptureSourceKind::Toplevel`** (cosmic-comp, already on `weak_window` branch):
+   - File: `src/wayland/protocols/image_capture_source.rs:37`
+   - Breaks the reference cycle — capture sources no longer keep `CosmicSurface` alive
+
+2. **Stop all capture sessions before dropping a toplevel** (cosmic-comp):
+   - File: `src/wayland/handlers/image_copy_capture/user_data.rs` — new `stop_all_capture_sessions(&UserDataMap)` function that drains owned `Session`/`CursorSession` from the surface's user data
+   - File: `src/wayland/protocols/toplevel_info.rs` — call `stop_all_capture_sessions(toplevel.user_data())` in `remove_toplevel()` (before `self.toplevels.retain()`) and in `refresh()` (in the `!window.alive()` branch)
+   - Needed because with `WeakCosmicSurface`, the `session_destroyed` callback can't `upgrade()` the weak ref after the surface is dropped, so `remove_session()` never runs. Explicitly draining sessions triggers `Session::drop()`, which fails active frames and releases GPU buffers.
+
+3. **Cherry-pick smithay `mem::forget` fix** (smithay commit [`3d3f9e35`](https://github.com/Smithay/smithay/commit/3d3f9e359352d95cffd1e53287d57df427fcbd34) by Ian Douglas Scott):
+   - File: `src/wayland/image_copy_capture/mod.rs`
+   - Replaces `std::mem::forget(self)` in `Frame::success()` and `Frame::fail()` with a `completed: bool` flag. Previously, `mem::forget` prevented `Frame::drop()` from running, silently leaking GPU buffers. With this fix, `Frame::drop()` properly fails uncommitted frames and releases resources.
+   - **Important:** This commit is included in smithay upstream master at rev `599857c`, but that rev also contains unrelated changes (`xdg-shell` v7 update, `ext-background-effect-v1` protocol) that cause `wp_viewport` protocol errors, crashing `cosmic-workspaces` at `screencopy.rs:81`. The fix must be cherry-picked onto the base rev (`14a2009`) individually to avoid this breakage.
+
+**Test results (fixed, 4 rounds of 20 windows + 5 Super+W cycles each):**
+
+| Round | cosmic-comp | cosmic-workspaces | Notes |
+|-------|------------|-------------------|-------|
+| 0 (baseline) | 32 MiB | 14 MiB | Fresh session |
+| 1 | 231 MiB | 142 MiB | One-time allocation of working set |
+| 2 | 207 MiB | 142 MiB | No growth |
+| 3 | 161 MiB | 142 MiB | No growth |
+| 4 | 248 MiB | 142 MiB | Normal variance, no accumulation |
+
+**Before fix:** cosmic-comp leaked +203 MiB per 5-cycle test, accumulating linearly.
+**After fix:** VRAM fluctuates but does not accumulate across cycles. Leak eliminated.
+
 ### Leak B: Minimized Windows killed while minimized
 
 Killing windows while minimized leaks VRAM through `minimized_windows` storage.
