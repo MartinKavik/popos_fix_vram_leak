@@ -370,146 +370,58 @@ Three changes are required together:
 **Before fix:** cosmic-comp leaked +203 MiB per 5-cycle test, accumulating linearly.
 **After fix:** VRAM fluctuates but does not accumulate across cycles. Leak eliminated.
 
-### Leak B: Minimized Windows killed while minimized
+### Leak B: Minimized Windows killed while minimized — VRAM likely already fixed, RAM leak remains
 
-Killing windows while minimized leaks VRAM through `minimized_windows` storage.
+> **Status:** The VRAM component of this leak was likely already fixed by the smithay `mem::forget` fix (upstream `599857c`, part of the Leak A fix set). Testing with the Leak A fixes applied shows VRAM returning to baseline after killing minimized windows. A **RAM leak** remains — dead `MinimizedWindow` entries are never removed from the Vec.
 
-| | Before | After killing 20 minimized windows | Delta |
-|--|--------|-------------------------------------|-------|
-| cosmic-comp VRAM | 1245 MiB | 1342 MiB | **+97 MiB** |
-| Total GPU | 3263 MiB | 3407 MiB | **+144 MiB** |
+**Original observation:** Killing windows while minimized appeared to leak ~4.8 MB VRAM per window (tested before Leak A fixes were applied). The VRAM leak chain went through `MinimizedWindow` → `CosmicMapped` → `CosmicSurface` → `Arc<WindowInner>` → `WlSurface` handles → `SurfaceUserData` → `MultiTextureInternal` → GPU textures.
 
-**Test:** Opened 20 cosmic-term windows, minimized all via title bar, then killed all 20 processes while minimized (`kill <pids>`). **~4.8 MB leaked per window** — identical rate to the original ToplevelHandleState leak, confirming the same `Arc<WindowInner>` → GPU texture chain.
+**Re-test with Leak A fixes (3 rounds, 20 minimized cosmic-terms killed each):**
 
-**Additionally**, `ImageCaptureSourceKind::Toplevel(CosmicSurface)` in `src/wayland/protocols/image_capture_source.rs:37` stores a strong `CosmicSurface` clone in the capture source user data. The `cosmic-applet-minimize` (minimized windows dock applet) creates toplevel capture sources for window thumbnails. If these capture source handles outlive the window, they contribute to the same VRAM leak chain. Fixing this would require changing to `WeakCosmicSurface`.
+| Round | Baseline | Peak (minimized) | After kill + 5s | Delta |
+|-------|----------|-------------------|-----------------|-------|
+| 1 | 898 MiB | 2768 MiB | 773 MiB | -125 MiB |
+| 2 | 773 MiB | 2770 MiB | 777 MiB | +4 MiB |
+| 3 | 718 MiB | 2693 MiB | 690 MiB | -28 MiB |
 
-**Fix summary (all cosmic-comp, no smithay changes):**
+VRAM drops back to (or below) baseline every time. The smithay `mem::forget` fix ensures GPU buffers/textures are properly released when the Wayland client disconnects, regardless of whether the compositor still holds a reference to the window.
 
-1. Add `impl IsAlive for MinimizedWindow` (prerequisite for all other fixes):
-   - File: `src/shell/workspace.rs` (near existing `impl IsAlive for FullscreenSurface`)
-   - Match all three variants (`Fullscreen`, `Floating`, `Tiling`), delegate to inner `surface`/`window.alive()`
+**Remaining issue (RAM only):** Dead `MinimizedWindow` entries stay in the `minimized_windows` Vec forever. The `CosmicMapped`/`CosmicSurface` structs are lightweight after the client disconnects (no GPU resources), but they still consume heap memory and are never cleaned up. This is unbounded — each killed-while-minimized window adds a stale entry that persists for the lifetime of the compositor.
 
-2. Fix `Workspace::unmap_surface()` — only matches `Fullscreen`, skips `Floating`/`Tiling`:
-   - File: `src/shell/workspace.rs:674`
-   - Change position search to use `active_window()` for all variants
+#### RAM leak fix (not yet applied)
 
-3. Add `minimized_windows.retain(|m| m.alive())` to `Workspace::refresh()`:
-   - File: `src/shell/workspace.rs:445`
+Add `alive()` to `MinimizedWindow` and retain only living entries in `refresh()`:
 
-4. Fix `WorkspaceSet::refresh()` — only refreshes active workspace, dead entries on non-active workspaces accumulate forever:
-   - File: `src/shell/mod.rs:597`
-   - Add loop over non-active workspaces: `workspace.minimized_windows.retain(|m| m.alive())`
-
-5. Add cleanup for `WorkspaceSet.minimized_windows` (sticky layer) which has zero cleanup:
-   - File: `src/shell/mod.rs:362`
-   - Add `self.minimized_windows.retain(|m| m.alive())` to `WorkspaceSet::refresh()`
-
-**Probable VRAM leak chain (same as main leak, different entry point):**
-```
-minimized_windows Vec (never cleaned for dead surfaces)
-  -> MinimizedWindow::Floating/Tiling { window: CosmicMapped }
-    -> CosmicSurface -> Window(Arc<WindowInner>)      <- keeps Arc refcount > 0
-      -> ToplevelSurface { wl_surface, shell_surface }
-        -> WlSurface handles alive
-          -> SurfaceUserData alive (wayland-server 0.31.x)
-            -> data_map alive
-              -> Arc<Mutex<MultiTextureInternal>> alive -> GPU textures trapped
-```
-
-### Bug 1: Workspace::unmap_surface() only checks Fullscreen minimized
-**File:** `src/shell/workspace.rs:674`
+**1. Add `MinimizedWindow::alive()` method** (`src/shell/workspace.rs`):
 
 ```rust
-// Only matches Fullscreen, skips Floating/Tiling:
-if let MinimizedWindow::Fullscreen { surface: s, .. } = m { s == surface } else { false }
-```
-
-**Full leak path:** `toplevel_destroyed()` → `Shell::unmap_surface()` (`src/shell/mod.rs:2881`) → iterates WorkspaceSets → calls `workspace.unmap_surface()` (`src/shell/workspace.rs:653`) → line 674 only matches `MinimizedWindow::Fullscreen` → Floating/Tiling variants return `false` → falls through to `element_for_surface()` at line 691 which searches floating/tiling layers but NOT `minimized_windows` → returns `None` → dead MinimizedWindow entry stays in Vec forever.
-
-**Proposed fix:** Change the position search at line 674 to check all variants via `active_window()`, then handle all variants in the removal block:
-
-```rust
-if let Some(pos) = self.minimized_windows.iter().position(|m| {
-    &m.active_window() == surface
-}) {
-    let minimized = self.minimized_windows.remove(pos);
-    minimized.active_window().set_minimized(false);
-    return Some((minimized.active_window(), match minimized {
-        MinimizedWindow::Fullscreen { previous, .. } => {
-            WorkspaceRestoreData::Fullscreen(previous)
-        }
-        MinimizedWindow::Floating { previous, .. } => {
-            WorkspaceRestoreData::Floating(Some(previous))
-        }
-        MinimizedWindow::Tiling { previous, .. } => {
-            WorkspaceRestoreData::Tiling(Some(previous))
-        }
-    }));
-}
-```
-
-### Bug 2: WorkspaceSet::refresh() only refreshes active workspace
-**File:** `src/shell/mod.rs:597-598`
-
-```rust
-self.workspaces[self.active].refresh();  // ONLY active workspace refreshed
-```
-
-`WorkspaceSet::refresh()` only calls `self.workspaces[self.active].refresh()` — non-active workspaces get zero cleanup. Dead fullscreen surfaces AND dead minimized windows on non-active workspaces accumulate forever.
-
-**Proposed fix:** Add a lightweight loop in `WorkspaceSet::refresh()` over non-active workspaces that only calls `workspace.minimized_windows.retain(|m| m.alive())` (avoids full refresh overhead on non-active workspaces):
-
-```rust
-// After the active workspace refresh:
-for (i, workspace) in self.workspaces.iter_mut().enumerate() {
-    if i != self.active {
-        workspace.minimized_windows.retain(|m| m.alive());
-    }
-}
-```
-
-### Bug 3: No alive() check for minimized_windows
-**Files:** `src/shell/workspace.rs:445-449`, `src/shell/mod.rs:578-601`
-
-`Workspace::refresh()` checks `fullscreen` (`take_if`), `floating_layer` (`.refresh()`), and `tiling_layer` (`.refresh()`) — but NOT `minimized_windows`. `WorkspaceSet::refresh()` also doesn't check its own `minimized_windows` (sticky layer). No `impl IsAlive for MinimizedWindow` exists in the codebase.
-
-**Proposed fix (prerequisite for other fixes):**
-
-Add `impl IsAlive for MinimizedWindow` (near existing `impl IsAlive for FullscreenSurface` at `src/shell/workspace.rs:223`):
-
-```rust
-impl IsAlive for MinimizedWindow {
-    fn alive(&self) -> bool {
+impl MinimizedWindow {
+    pub fn alive(&self) -> bool {
         match self {
             MinimizedWindow::Fullscreen { surface, .. } => surface.alive(),
-            MinimizedWindow::Floating { window, .. } => window.alive(),
-            MinimizedWindow::Tiling { window, .. } => window.alive(),
+            MinimizedWindow::Floating { window, .. }
+            | MinimizedWindow::Tiling { window, .. } => window.alive(),
         }
     }
 }
 ```
 
-Then add cleanup to `Workspace::refresh()` (`src/shell/workspace.rs:445`):
+**2. Clean up dead entries in `Workspace::refresh()`** (`src/shell/workspace.rs`):
 
 ```rust
 pub fn refresh(&mut self) {
     self.fullscreen.take_if(|w| !w.alive());
+    self.minimized_windows.retain(|w| w.alive());  // NEW
     self.floating_layer.refresh();
     self.tiling_layer.refresh();
-    self.minimized_windows.retain(|m| m.alive());  // NEW
 }
 ```
 
-### Bug 4: WorkspaceSet.minimized_windows (sticky) has no cleanup
-**File:** `src/shell/mod.rs:362, 578-601`
+**3. Additional cleanup locations** (same pattern, not yet applied):
 
-`WorkspaceSet` has its own `minimized_windows: Vec<MinimizedWindow>` (line 362) for sticky layer minimized windows. This Vec is never checked for dead surfaces — `WorkspaceSet::refresh()` calls `self.sticky_layer.refresh()` but NOT `self.minimized_windows.retain(...)`.
-
-**Proposed fix:** Add to `WorkspaceSet::refresh()`:
-
-```rust
-self.sticky_layer.refresh();
-self.minimized_windows.retain(|m| m.alive());  // NEW: sticky minimized
+- `WorkspaceSet::refresh()` (`src/shell/mod.rs`) — only refreshes active workspace; non-active workspaces need `workspace.minimized_windows.retain(|m| m.alive())` too
+- `WorkspaceSet.minimized_windows` (sticky layer, `src/shell/mod.rs`) — has its own Vec with zero cleanup
+- `Workspace::unmap_surface()` (`src/shell/workspace.rs`) — only matches `MinimizedWindow::Fullscreen`, skips `Floating`/`Tiling` variants; should use `active_window()` to match all variants
 ```
 
 ## Merging Upstream
