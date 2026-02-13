@@ -6,7 +6,7 @@ Fixes a VRAM leak in the COSMIC compositor where GPU texture memory is never rec
 
 ## Forked Repositories
 
-- **cosmic-comp:** [github.com/MartinKavik/cosmic-comp @ weak_window](https://github.com/MartinKavik/cosmic-comp/tree/weak_window) — [diff vs upstream master](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:weak_window)
+- **cosmic-comp:** [github.com/MartinKavik/cosmic-comp @ weak_window_upstream_smithay](https://github.com/MartinKavik/cosmic-comp/tree/weak_window_upstream_smithay) — [diff vs upstream master](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:weak_window_upstream_smithay)
   Structural fix: stores `Weak` references in `ToplevelHandleState`, making the VRAM leak impossible
 - **cosmic-comp:** [github.com/MartinKavik/cosmic-comp @ fix_vram_leak](https://github.com/MartinKavik/cosmic-comp/tree/fix_vram_leak) — [diff vs upstream master](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:fix_vram_leak)
   Quick fix: explicitly clears stale references + fixes shader cache and activation token leaks
@@ -104,7 +104,7 @@ The root cause spans two layers:
 
 ### Affected compositors
 
-- **Cosmic** — affected (my fix: [cosmic-comp @ weak_window](https://github.com/MartinKavik/cosmic-comp/tree/weak_window), also [@ fix_vram_leak](https://github.com/MartinKavik/cosmic-comp/tree/fix_vram_leak))
+- **Cosmic** — affected (my fix: [cosmic-comp @ weak_window_upstream_smithay](https://github.com/MartinKavik/cosmic-comp/tree/weak_window_upstream_smithay), also [@ fix_vram_leak](https://github.com/MartinKavik/cosmic-comp/tree/fix_vram_leak))
 - **Niri** — affected, fixed via [YaLTeR/niri#3404](https://github.com/YaLTeR/niri/pull/3404) (merged)
 - **River, Hyprland, Sway** — NOT affected (not Smithay-based)
 - Confirmed on both AMD and NVIDIA GPUs
@@ -133,7 +133,7 @@ Since `Window` is `Arc<WindowInner>`, we can store `Weak<WindowInner>` in the pr
 
 **Branches:**
 - **smithay:** [MartinKavik/smithay @ weak_window](https://github.com/MartinKavik/smithay/tree/weak_window) — [diff vs upstream master](https://github.com/Smithay/smithay/compare/master...MartinKavik:smithay:weak_window)
-- **cosmic-comp:** [MartinKavik/cosmic-comp @ weak_window](https://github.com/MartinKavik/cosmic-comp/tree/weak_window) — [diff vs upstream master](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:weak_window)
+- **cosmic-comp:** [MartinKavik/cosmic-comp @ weak_window_upstream_smithay](https://github.com/MartinKavik/cosmic-comp/tree/weak_window_upstream_smithay) — [diff vs upstream master](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:weak_window_upstream_smithay)
 
 ### Changes
 
@@ -343,7 +343,7 @@ ImageCaptureSource (Arc)
 
 Three changes are required together:
 
-1. **Use `WeakCosmicSurface` in `ImageCaptureSourceKind::Toplevel`** (cosmic-comp, already on `weak_window` branch):
+1. **Use `WeakCosmicSurface` in `ImageCaptureSourceKind::Toplevel`** (cosmic-comp, already on `weak_window_upstream_smithay` branch):
    - File: `src/wayland/protocols/image_capture_source.rs:37`
    - Breaks the reference cycle — capture sources no longer keep `CosmicSurface` alive
 
@@ -428,7 +428,7 @@ pub fn refresh(&mut self) {
 ### Recommended: WeakWindow approach
 
 1. Merge [smithay @ weak_window](https://github.com/Smithay/smithay/compare/master...MartinKavik:smithay:weak_window) — adds `WeakWindow` type (1 file, ~25 lines)
-2. Merge [cosmic-comp @ weak_window](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:weak_window) — stores weak references in `ToplevelHandleState` (3 files)
+2. Merge [cosmic-comp @ weak_window_upstream_smithay](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:weak_window_upstream_smithay) — stores weak references in `ToplevelHandleState` (3 files)
 3. Also merge the shader cache and activation token fixes from [cosmic-comp @ fix_vram_leak](https://github.com/pop-os/cosmic-comp/compare/master...MartinKavik:cosmic-comp:fix_vram_leak) — these are separate leaks not addressed by `WeakWindow`
 
 ### Alternative: quick fix only (no smithay changes)
