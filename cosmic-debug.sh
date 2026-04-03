@@ -15,6 +15,9 @@ Environment variables (all optional):
   LOG_FILE         Log output        (default: /tmp/cosmic-debug.log)
   RUST_LOG         Log filter        (default: info,smithay=info)
   LIBSEAT_BACKEND  Seat backend      (default: seatd)
+  COSMIC_DEBUG_COMMIT_FILTER           1=enable no-op commit suppression logs
+  COSMIC_DEBUG_RENDER_SCHED            1=enable schedule_render coalescing logs
+  COSMIC_DEBUG_OVERLOAD_TRANSITIONS    1=enable overload/skip transition logs
 EOF
 }
 
@@ -22,6 +25,9 @@ COSMIC_COMP_BIN="${COSMIC_COMP_BIN:-$HOME/repos/cosmic-comp/target/release/cosmi
 LOG_FILE="${LOG_FILE:-/tmp/cosmic-debug.log}"
 RUST_LOG="${RUST_LOG:-info,smithay=info}"
 LIBSEAT_BACKEND="${LIBSEAT_BACKEND:-seatd}"
+COSMIC_DEBUG_COMMIT_FILTER="${COSMIC_DEBUG_COMMIT_FILTER:-1}"
+COSMIC_DEBUG_RENDER_SCHED="${COSMIC_DEBUG_RENDER_SCHED:-1}"
+COSMIC_DEBUG_OVERLOAD_TRANSITIONS="${COSMIC_DEBUG_OVERLOAD_TRANSITIONS:-1}"
 
 cmd_start() {
   if [[ ! -x "$COSMIC_COMP_BIN" ]]; then
@@ -34,6 +40,9 @@ cmd_start() {
   echo "  LOG_FILE=$LOG_FILE"
   echo "  RUST_LOG=$RUST_LOG"
   echo "  LIBSEAT_BACKEND=$LIBSEAT_BACKEND"
+  echo "  COSMIC_DEBUG_COMMIT_FILTER=$COSMIC_DEBUG_COMMIT_FILTER"
+  echo "  COSMIC_DEBUG_RENDER_SCHED=$COSMIC_DEBUG_RENDER_SCHED"
+  echo "  COSMIC_DEBUG_OVERLOAD_TRANSITIONS=$COSMIC_DEBUG_OVERLOAD_TRANSITIONS"
   echo ""
 
   # Truncate log and make writable by non-root users
@@ -66,6 +75,9 @@ cmd_start() {
     RUST_LOG="$RUST_LOG" \
     RUST_BACKTRACE=1 \
     LIBSEAT_BACKEND="$LIBSEAT_BACKEND" \
+    COSMIC_DEBUG_COMMIT_FILTER="$COSMIC_DEBUG_COMMIT_FILTER" \
+    COSMIC_DEBUG_RENDER_SCHED="$COSMIC_DEBUG_RENDER_SCHED" \
+    COSMIC_DEBUG_OVERLOAD_TRANSITIONS="$COSMIC_DEBUG_OVERLOAD_TRANSITIONS" \
     XDG_RUNTIME_DIR=/run/user/0 \
     SMITHAY_CACHE_LOG=1 \
     seatd-launch -- "$COSMIC_COMP_BIN" 2>&1 | tee -a "$LOG_FILE"

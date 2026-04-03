@@ -25,6 +25,24 @@ I have two working fixes for the VRAM leak, both tested with zero leakage:
 
 Both approaches are proven and tested. The `weak_window` approach is architecturally cleaner; the `fix_vram_leak` approach is simpler to merge since it doesn't touch smithay.
 
+## Other Investigations In This Repo
+
+This repo now also tracks two separate long-session COSMIC stability issues:
+
+- [`CPU_USAGE_FIX.md`](/home/martinkavik/repos/popos_fix_vram_leak/CPU_USAGE_FIX.md)
+  CPU/render lag investigation, including the later-discovered panel/app FD exhaustion issue on March 11, 2026.
+- [`COSMIC_COMP_SIMPLIFICATION_PLAN_2026_04_02.md`](/home/martinkavik/repos/popos_fix_vram_leak/COSMIC_COMP_SIMPLIFICATION_PLAN_2026_04_02.md)
+  Current stabilization plan focused on deleting complexity from the compositor hot path and restoring usable desktop responsiveness.
+- [`SUSPEND_HIBERNATE_DEBUG.md`](/home/martinkavik/repos/popos_fix_vram_leak/SUSPEND_HIBERNATE_DEBUG.md)
+  Suspend/resume debugging notes.
+- [`TODO.md`](/home/martinkavik/repos/popos_fix_vram_leak/TODO.md)
+  Current deployment and soak-test checklist.
+
+Helpful local tools:
+
+- [`cosmic-debug.sh`](/home/martinkavik/repos/popos_fix_vram_leak/cosmic-debug.sh)
+- [`cosmic-fd-monitor.sh`](/home/martinkavik/repos/popos_fix_vram_leak/cosmic-fd-monitor.sh)
+
 ### 1. VRAM Leak — ToplevelHandleState.window never cleared (cosmic-comp)
 
 **Root cause of the VRAM leak.** When a window is destroyed, cosmic-comp's `remove_toplevel()` sends `closed` events to protocol clients and removes the window from its `toplevels` Vec, but never clears the `window: Option<CosmicSurface>` field in each `ZcosmicToplevelHandleV1` handle's user data (`ToplevelHandleState`).
