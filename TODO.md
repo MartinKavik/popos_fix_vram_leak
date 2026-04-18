@@ -261,6 +261,30 @@ We still need a real-world soak on `minotiros` after the new binary is installed
 - Important:
   - the current live GUI session is still running `5921355...`
   - `bdcf642...` is only on disk until the next relogin or reboot
+
+## April 18 17:26 staged lag fix, phase 3
+
+- Implemented the next isolated shell-lookup step in [`src/shell/mod.rs`](/home/martinkavik/repos/cosmic-comp/src/shell/mod.rs):
+  - `Shell::element_for_surface()` now checks the active workspace in each workspace set first
+  - then sticky mapped windows
+  - then minimized windows
+  - then non-active workspaces as fallback
+- Scope stayed narrow:
+  - no startup-path changes
+  - no KMS/render-thread changes
+  - no cache/index layer yet
+- Why this step:
+  - live profiling on the running builds still showed `element_for_surface()` hotter than expected
+  - the old ordering paid minimized/global scan cost before the common case of a visible active-workspace window commit
+- Validation:
+  - `cargo check -p cosmic-comp` passed
+  - `cargo build --release -p cosmic-comp` passed
+- Installed next-session candidate:
+  - installed `/usr/bin/cosmic-comp`: `886dcc2b0d9fa96109c8d92a0f701b3370ea4cec50f1c5e51ca10b0f81a00160`
+  - rollback backup: [`/usr/bin/cosmic-comp.backup.20260418-172634`](/usr/bin/cosmic-comp.backup.20260418-172634) = `bdcf642292dea3cef2534bc238a5bc9c0466badffd07193a42822cc8cd7c9008`
+- Important:
+  - the current live GUI session is still running `5921355...`
+  - neither phase 2 nor phase 3 is active until relogin or reboot
   - this is intended to cut cursor/input-driven cross-output redraw churn without dropping redraws on real output switches
 
 ## April 13 19:34 next-boot candidate
