@@ -285,6 +285,36 @@ We still need a real-world soak on `minotiros` after the new binary is installed
 - Important:
   - the current live GUI session is still running `5921355...`
   - neither phase 2 nor phase 3 is active until relogin or reboot
+
+## April 18 21:06 staged lag fix, phase 4
+
+- Implemented the first structural cache step from the roadmap in [`src/shell/mod.rs`](/home/martinkavik/repos/cosmic-comp/src/shell/mod.rs):
+  - added a lazy per-surface `SurfaceCommitLookupCache` stored in Smithay surface state
+  - cache stores:
+    - a weak output hint for visible-output lookup
+    - a `CosmicMappedKey` hint for mapped-element lookup
+  - every cache hit is validated before use; stale entries are dropped and fall back to the old scan
+- The two hot commit-time paths now use that cache:
+  - `Common::on_commit()` uses `shell.cached_element_for_surface(surface)` instead of unconditional `element_for_surface(surface)`
+  - `Shell::visible_output_for_surface()` now checks a validated cached output hint before the full multi-output scan
+  - `Shell::resizing_element_for_surface()` now checks the validated cached mapped hint before its resize-state scan
+- Scope stayed narrow:
+  - no startup-path changes
+  - no seat/session changes
+  - no KMS thread changes
+  - no global surface index yet
+- Why this step:
+  - live profiling on the running `886dcc...` session still showed the main thread dominated by repeated Wayland object lookup churn
+  - earlier reorder/fast-path changes reduced some waste but did not change the fundamental repeated commit-time lookup cost enough
+- Validation:
+  - `cargo check -p cosmic-comp` passed
+  - `cargo build --release -p cosmic-comp` passed
+- Installed next-session candidate:
+  - installed `/usr/bin/cosmic-comp`: `21a655c01b754bedf21fca026850b86db12621ce79917321268a4eee0dc4cfad`
+  - rollback backup: [`/usr/bin/cosmic-comp.backup.20260418-210617`](/usr/bin/cosmic-comp.backup.20260418-210617) = `886dcc2b0d9fa96109c8d92a0f701b3370ea4cec50f1c5e51ca10b0f81a00160`
+- Important:
+  - the current live GUI session is still running `886dcc...`
+  - phase 4 is only on disk until the next relogin or reboot
   - this is intended to cut cursor/input-driven cross-output redraw churn without dropping redraws on real output switches
 
 ## April 13 19:34 next-boot candidate
