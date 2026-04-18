@@ -242,6 +242,25 @@ We still need a real-world soak on `minotiros` after the new binary is installed
   - the current live GUI session is still running `41baa99...`
   - `5921355...` is only on disk until the next relogin or reboot
   - do not batch the next PDF-suggested stages until this one is measured first
+
+## April 18 16:13 staged lag fix, phase 2
+
+- Implemented the next isolated step from the staged lag roadmap in [`src/shell/mod.rs`](/home/martinkavik/repos/cosmic-comp/src/shell/mod.rs) and [`src/shell/element/mod.rs`](/home/martinkavik/repos/cosmic-comp/src/shell/element/mod.rs):
+  - added `CosmicMapped::has_toplevel_surface(&WlSurface)`
+  - `Shell::visible_output_for_surface()` now tries a cheap toplevel-only match for sticky and active-workspace windows before falling back to the existing `WindowSurfaceType::ALL` scan
+- Scope intentionally stayed narrow:
+  - no startup-path changes
+  - no KMS or seat/session changes
+  - existing `ALL` behavior remains as fallback for subsurfaces and popups
+- Validation:
+  - `cargo check -p cosmic-comp` passed
+  - `cargo build --release -p cosmic-comp` passed
+- Installed next-session candidate:
+  - installed `/usr/bin/cosmic-comp`: `bdcf642292dea3cef2534bc238a5bc9c0466badffd07193a42822cc8cd7c9008`
+  - rollback backup: [`/usr/bin/cosmic-comp.backup.20260418-161333`](/usr/bin/cosmic-comp.backup.20260418-161333) = `5921355a2517a72f67671940d1cb221a3246088d5872036358311c05b4c394b1`
+- Important:
+  - the current live GUI session is still running `5921355...`
+  - `bdcf642...` is only on disk until the next relogin or reboot
   - this is intended to cut cursor/input-driven cross-output redraw churn without dropping redraws on real output switches
 
 ## April 13 19:34 next-boot candidate
