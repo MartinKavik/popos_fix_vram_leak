@@ -315,6 +315,25 @@ We still need a real-world soak on `minotiros` after the new binary is installed
 - Important:
   - the current live GUI session is still running `886dcc...`
   - phase 4 is only on disk until the next relogin or reboot
+
+## April 19 11:22 staged lag fix, combined follow-up
+
+- Three additional lag-optimization steps were stacked on top of phase 4 and then built together:
+  - cached mapped hints now validate against `WindowSurfaceType::ALL`, so subsurface/popup commits can reuse the mapped-element hint instead of falling back to a global scan
+  - `visible_output_for_surface()` now uses a cached mapped hint to resolve the output directly through shell/workspace ownership before falling back to the full per-output visibility scan
+  - the commit path now computes `layer_output_for_surface()` once and reuses it for both render scheduling and later layer `arrange()`, removing the duplicate layer-map scan for layer-surface commits
+- These changes live in:
+  - [`src/shell/mod.rs`](/home/martinkavik/repos/cosmic-comp/src/shell/mod.rs)
+  - [`src/wayland/handlers/compositor.rs`](/home/martinkavik/repos/cosmic-comp/src/wayland/handlers/compositor.rs)
+- Validation:
+  - `cargo check -p cosmic-comp` passed
+  - `cargo build --release -p cosmic-comp` passed after reboot
+- Installed next-session candidate:
+  - installed `/usr/bin/cosmic-comp`: `ba1092624cb1052bcfd6a0c002007b967a22891da9beef3e4746f5547b6c9f47`
+  - rollback backup: [`/usr/bin/cosmic-comp.backup.20260419-112232`](/usr/bin/cosmic-comp.backup.20260419-112232) = `21a655c01b754bedf21fca026850b86db12621ce79917321268a4eee0dc4cfad`
+- Important:
+  - the currently running session was still the older `21a655...` image at install time
+  - this combined candidate only becomes active after relogin or reboot
   - this is intended to cut cursor/input-driven cross-output redraw churn without dropping redraws on real output switches
 
 ## April 13 19:34 next-boot candidate
