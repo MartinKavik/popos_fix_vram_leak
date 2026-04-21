@@ -258,6 +258,32 @@ We still need a real-world soak on `minotiros` after the new binary is installed
 - Installed next-session candidate:
   - installed `/usr/bin/cosmic-comp`: `bdcf642292dea3cef2534bc238a5bc9c0466badffd07193a42822cc8cd7c9008`
   - rollback backup: [`/usr/bin/cosmic-comp.backup.20260418-161333`](/usr/bin/cosmic-comp.backup.20260418-161333) = `5921355a2517a72f67671940d1cb221a3246088d5872036358311c05b4c394b1`
+
+## April 20 adaptive guardrails candidate
+
+- Live diagnostics on the indexed metrics build narrowed the remaining lag to three hot commit-path wastes:
+  - resize lookup was attempted on almost every commit even with no active resize
+  - mapped-element lookup was still attempted for many non-window roles and missed heavily
+  - layer-surface commits were triggering `arrange()` checks that almost always ended unchanged
+- Implemented a guardrailed follow-up in the plain tree:
+  - commit-time resize lookup is now skipped entirely unless there is an active resize grab or a window still waiting for its final resize commit
+  - non-window indexed roles now bypass mapped-element lookup in both `Common::on_commit()` and `cached_element_for_surface()`
+  - full fallback scans for unresolved surfaces now use a per-surface backoff after repeated misses
+  - layer-surface `arrange()` now runs only for top-level layer commits whose geometry-relevant cached state changed; unchanged layer churn is counted and temporarily backed off
+- Files changed:
+  - [`src/shell/mod.rs`](/home/martinkavik/repos/cosmic-comp/src/shell/mod.rs)
+  - [`src/wayland/handlers/compositor.rs`](/home/martinkavik/repos/cosmic-comp/src/wayland/handlers/compositor.rs)
+  - [`src/shell/layout/floating/grabs/resize.rs`](/home/martinkavik/repos/cosmic-comp/src/shell/layout/floating/grabs/resize.rs)
+  - [`src/shell/layout/floating/mod.rs`](/home/martinkavik/repos/cosmic-comp/src/shell/layout/floating/mod.rs)
+  - [`src/wayland/handlers/layer_shell.rs`](/home/martinkavik/repos/cosmic-comp/src/wayland/handlers/layer_shell.rs)
+- Validation:
+  - `cargo check -p cosmic-comp` passed
+  - `cargo build --release -p cosmic-comp` passed
+- Installed next-session candidate:
+  - installed `/usr/bin/cosmic-comp`: `fa111d65959edf9e029ce9606b50855b749fae4b6a7f140a4c8a7c21adc2c9bf`
+  - rollback backup: [`/usr/bin/cosmic-comp.backup.20260420-024242`](/usr/bin/cosmic-comp.backup.20260420-024242) = `bdab3924e0b329844b8f6b2f329c696138db4e8cfd2c3ef843626d6d22f18d8c`
+  - current live session is still running the old deleted image:
+    - `/proc/3184/exe` = `bdab3924e0b329844b8f6b2f329c696138db4e8cfd2c3ef843626d6d22f18d8c`
 - Important:
   - the current live GUI session is still running `5921355...`
   - `bdcf642...` is only on disk until the next relogin or reboot
@@ -689,3 +715,40 @@ We still need a real-world soak on `minotiros` after the new binary is installed
   - the primary-scanout fast path did not eliminate the main-thread lookup churn
   - the stronger remaining suspect is repeated `element_for_surface` scanning, not `workspace_for_surface`
   - next lag iteration should target surface-to-element lookup cost, likely by adding a cheap fast path or cache before the current full workspace/sticky/minimized scans
+
+## April 21 schedule-coalescing candidate on `fa111d...`
+
+- Live metrics on the running `fa111d...` build narrowed the remaining lag shape:
+  - lookup-path full scans are no longer the dominant cost
+  - resize lookup waste is gone when no resize is active
+  - unchanged layer `arrange()` churn is being skipped/backed off correctly
+  - the remaining pressure is high raw visible-commit scheduling volume on the main thread
+- Recent `[perf] surface lookup cache stats` intervals showed:
+  - `commit_total`: about `5k-9k/min`
+  - `commit_schedule_from_visible`: about `3.6k-7.9k/min`
+  - `visible_path_primary_scanout`: dominant fast path, about `3k-7.7k/min`
+  - `element_index_hits`: dominant, about `3.1k-7.8k/min`
+  - `visible_path_full_scan`: very low
+  - `element_index_role_skips`: still `0`, so non-window role gating was not the current limiter
+- New hypothesis:
+  - even after the lookup fixes, the main thread is still sending too many `schedule_render()` requests across the KMS surface-thread channel
+  - `queue_redraw()` already coalesces inside the surface thread, but the main thread still pays to enqueue every request unless it is suppressed earlier
+- Change in `src/backend/kms/surface/mod.rs`:
+  - added a per-surface `render_request_pending` latch in front of `ThreadCommand::ScheduleRender`
+  - main-thread `schedule_render()` now suppresses duplicate requests while one is already pending for that output surface
+  - the latch is cleared when the surface thread receives the command and on suspend/resume/DPMS-off transitions
+  - added new per-output `[perf] surface schedule stats` counters at `warn` level:
+    - `schedule_requested`
+    - `schedule_dispatched`
+    - `schedule_suppressed_pending`
+    - `schedule_thread_commands`
+    - `schedule_startup_skips`
+    - `schedule_dpms_off_skips`
+    - `queue_redraw_queued_new`
+    - `queue_redraw_queued_from_estimated_vblank`
+    - `queue_redraw_already_queued`
+    - `queue_redraw_waiting_for_vblank`
+    - `queue_redraw_force_replaced`
+- Expected next-boot interpretation:
+  - if `schedule_suppressed_pending` is huge while `schedule_dispatched` stays much lower, the missing problem was pre-channel output scheduling spam
+  - if `schedule_dispatched` still tracks `schedule_requested` closely and lag remains, then the remaining problem is actual redraw demand rather than channel/enqueue churn
