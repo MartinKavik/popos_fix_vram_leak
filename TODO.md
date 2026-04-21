@@ -752,3 +752,13 @@ We still need a real-world soak on `minotiros` after the new binary is installed
 - Expected next-boot interpretation:
   - if `schedule_suppressed_pending` grows materially while `schedule_dispatched` falls and lag improves, the missing problem was repeated visible-commit scheduling while outputs were already queued or already waiting for vblank
   - if `schedule_dispatched` still tracks `schedule_requested` closely and lag remains, then the remaining problem is actual redraw demand rather than output scheduling churn
+- April 22 follow-up on `c29f702...`:
+  - the stronger vblank-spanning latch worked, especially on `DP-1`; `schedule_suppressed_pending` rose into the high hundreds / low thousands per minute and `schedule_dispatched` dropped materially
+  - however, the session still lagged badly because fast-path visible commits were still extremely frequent:
+    - `commit_schedule_from_visible` remained around `5k-6k/min`
+    - `visible_path_primary_scanout` remained dominant
+    - lookup waste stayed mostly fixed
+  - new follow-up change:
+    - added a short per-surface visible-commit schedule backoff in `src/shell/mod.rs`
+    - commits from the same surface to the same output now only trigger visible scheduling once per 8ms window
+    - added new counter `commit_schedule_visible_backoff_skips` to show how much of the remaining visible-commit spam is being clamped before KMS scheduling
