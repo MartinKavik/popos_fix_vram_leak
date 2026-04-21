@@ -736,7 +736,7 @@ We still need a real-world soak on `minotiros` after the new binary is installed
 - Change in `src/backend/kms/surface/mod.rs`:
   - added a per-surface `render_request_pending` latch in front of `ThreadCommand::ScheduleRender`
   - main-thread `schedule_render()` now suppresses duplicate requests while one is already pending for that output surface
-  - the latch is cleared when the surface thread receives the command and on suspend/resume/DPMS-off transitions
+  - follow-up adjustment: the latch now stays set across the queued/vblank period and is only cleared when the queued redraw actually begins, plus on startup-skip and suspend/resume/DPMS-off transitions
   - added new per-output `[perf] surface schedule stats` counters at `warn` level:
     - `schedule_requested`
     - `schedule_dispatched`
@@ -750,5 +750,5 @@ We still need a real-world soak on `minotiros` after the new binary is installed
     - `queue_redraw_waiting_for_vblank`
     - `queue_redraw_force_replaced`
 - Expected next-boot interpretation:
-  - if `schedule_suppressed_pending` is huge while `schedule_dispatched` stays much lower, the missing problem was pre-channel output scheduling spam
-  - if `schedule_dispatched` still tracks `schedule_requested` closely and lag remains, then the remaining problem is actual redraw demand rather than channel/enqueue churn
+  - if `schedule_suppressed_pending` grows materially while `schedule_dispatched` falls and lag improves, the missing problem was repeated visible-commit scheduling while outputs were already queued or already waiting for vblank
+  - if `schedule_dispatched` still tracks `schedule_requested` closely and lag remains, then the remaining problem is actual redraw demand rather than output scheduling churn
