@@ -763,3 +763,37 @@ We still need a real-world soak on `minotiros` after the new binary is installed
     - the first few rapid commits from the same surface/output still schedule normally
     - only sustained micro-bursts inside the same 8ms window are clamped
     - added new counter `commit_schedule_visible_backoff_skips` to show how much of the remaining visible-commit spam is being clamped before KMS scheduling
+- April 22 render-side follow-up on `4b50b15...`:
+  - current live logs showed the previous clamp fixed the video/playback regression, but lag still remained
+  - the new data said lookup waste and queue buildup were no longer the main bottleneck:
+    - `visible_path_full_scan=0`
+    - `element_index_misses` near zero in steady windows
+    - `schedule_suppressed_pending` very high on both outputs
+    - yet real dispatch volume and `commit_schedule_from_visible` still stayed high
+  - new hypothesis:
+    - the remaining cost has moved into actual scene assembly / redraw work in `src/backend/render/mod.rs`, not commit lookup or schedule spam
+  - new combined change:
+    - added per-output `[perf] render assembly stats` logging at `warn` level in `src/backend/render/mod.rs`
+    - new counters include:
+      - `output_elements_*`
+      - `workspace_elements_*`
+      - `cursor_*`
+      - `render_input_order_*`
+      - per-stage calls / elements / time for:
+        - `ZoomUI`
+        - `SessionLock`
+        - `LayerPopup`
+        - `LayerSurface`
+        - `OverrideRedirect`
+        - `StickyPopups`
+        - `Sticky`
+        - `WorkspacePopups`
+        - `Workspace`
+    - added a low-risk render optimization in `cursor_elements()`:
+      - skip per-output seat cursor/DnD processing when that seat has no pointer on the output and no active move/menu grab that could affect it
+      - continue rendering move/menu grabs when active, because they may still span outputs
+      - added `cursor_seats_total` and `cursor_seats_skipped` to show whether that filter is carrying real load
+  - next-boot interpretation:
+    - if `cursor_us_total` drops and `cursor_seats_skipped` is large, seat-to-output cursor/grab churn was a real contributor
+    - if `stage_workspace_*` dominates, the next target is `workspace.render()` / `workspace.render_popups()`
+    - if `stage_layer_surface_*` or `stage_layer_popup_*` dominates, the next target is layer-surface tree rendering rather than workspace windows
