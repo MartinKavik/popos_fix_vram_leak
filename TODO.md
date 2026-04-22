@@ -759,6 +759,7 @@ We still need a real-world soak on `minotiros` after the new binary is installed
     - `visible_path_primary_scanout` remained dominant
     - lookup waste stayed mostly fixed
   - new follow-up change:
-    - added a short per-surface visible-commit schedule backoff in `src/shell/mod.rs`
-    - commits from the same surface to the same output now only trigger visible scheduling once per 8ms window
+    - replaced the fixed per-surface visible-commit delay with a short burst-based guard in `src/shell/mod.rs`
+    - the first few rapid commits from the same surface/output still schedule normally
+    - only sustained micro-bursts inside the same 8ms window are clamped
     - added new counter `commit_schedule_visible_backoff_skips` to show how much of the remaining visible-commit spam is being clamped before KMS scheduling
