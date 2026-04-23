@@ -797,3 +797,18 @@ We still need a real-world soak on `minotiros` after the new binary is installed
     - if `cursor_us_total` drops and `cursor_seats_skipped` is large, seat-to-output cursor/grab churn was a real contributor
     - if `stage_workspace_*` dominates, the next target is `workspace.render()` / `workspace.render_popups()`
     - if `stage_layer_surface_*` or `stage_layer_popup_*` dominates, the next target is layer-surface tree rendering rather than workspace windows
+- April 24 liveness follow-up on `b20fc...`:
+  - user reported the session is more usable over time, but videos / whole screens sometimes need pointer hover to resume rendering
+  - diagnosis:
+    - the hard visible-commit burst clamp can drop the exact commit that a frame-callback-driven client needs to advance
+    - when that commit never reaches KMS scheduling, no next frame callback may be produced until unrelated pointer hover schedules a render
+  - surgical change in `src/shell/mod.rs`:
+    - keep the burst detector and counter path
+    - stop hard-dropping saturated visible commits
+    - count those cases as `commit_schedule_visible_backoff_soft_hits`
+    - rely on the vblank-spanning KMS output coalescing to suppress duplicate render queue pressure without risking client starvation
+  - expected result:
+    - videos and animated/browser surfaces should no longer require hover to kick rendering
+    - `commit_schedule_visible_backoff_skips` should stay at `0`
+    - `commit_schedule_visible_backoff_soft_hits` shows how often the old hard clamp would have fired
+    - if lag regresses, the next target remains workspace render assembly, not restoring hard visible-commit drops
