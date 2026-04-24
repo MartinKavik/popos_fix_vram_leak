@@ -812,3 +812,28 @@ We still need a real-world soak on `minotiros` after the new binary is installed
     - `commit_schedule_visible_backoff_skips` should stay at `0`
     - `commit_schedule_visible_backoff_soft_hits` shows how often the old hard clamp would have fired
     - if lag regresses, the next target remains workspace render assembly, not restoring hard visible-commit drops
+- April 24 input-schedule follow-up on `5abaa8...`:
+  - user reported the session starts getting laggy again
+  - current live state:
+    - running and installed compositor hash was `5abaa8aff5b75cfff14514be6850a203fe0be6c836a31bf7a7c893b5fe49d8cb`
+    - `commit_schedule_visible_backoff_skips=0` and `commit_schedule_visible_backoff_soft_hits=0` in the recent windows, so the liveness fix was not the active lag source
+    - lookup remained cheap: `visible_path_full_scan=0`, `element_index_misses` mostly `0`
+    - render assembly was moderate, but some surface schedule intervals showed `schedule_requested` exploding far above commit count:
+      - example: `DP-1 schedule_requested=14743`, `schedule_dispatched=14254`, while commit volume was only around `3k/min`
+      - example: `HDMI-A-1 schedule_requested=16844`, `schedule_suppressed_pending=14815`
+    - a `prompter` process was also pegging one CPU at about `100%`, so external CPU pressure was present
+  - diagnosis:
+    - libinput still schedules renders for active/focused/pointer outputs after every input event
+    - high-rate pointer/input events can drive render schedule attempts far above display rate
+  - change in `src/backend/kms/mod.rs`:
+    - added input-origin render scheduling counters:
+      - `input_events`
+      - `input_outputs_considered`
+      - `input_schedule_dispatched`
+      - `input_schedule_throttled`
+    - added `[perf] kms input render stats` at `warn` level
+    - throttled input-origin render scheduling per output to one dispatch per `8ms`
+    - client commit scheduling, layer scheduling, animation scheduling, and KMS vblank coalescing are unchanged
+  - expected next-boot interpretation:
+    - if `input_schedule_throttled` is high and `surface schedule stats.schedule_requested` falls, input event wakeups were a real remaining amplifier
+    - if lag remains while input throttle is low, the next target is still workspace/layer render assembly or external CPU load
