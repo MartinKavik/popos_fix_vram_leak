@@ -1,0 +1,65 @@
+// Local override installed to /etc/system76-scheduler/config.kdl.
+// Keep compositors above browser/app workloads while avoiding realtime priority.
+version "2.0"
+
+autogroup-enabled false
+
+cfs-profiles enable=true {
+    default latency=6 nr-latency=8 wakeup-granularity=1.0 bandwidth-size=5 preempt="voluntary"
+    responsive latency=4 nr-latency=10 wakeup-granularity=0.5 bandwidth-size=3 preempt="full"
+}
+
+process-scheduler enable=true {
+    refresh-rate 60
+    execsnoop true
+
+    assignments {
+        sound-server nice=-15 io=(realtime)0 {
+            "/usr/bin/pipewire"
+            "/usr/bin/pipewire-pulse"
+            "/usr/bin/jackd"
+        }
+
+        recording nice=-9 io=(best-effort)0
+        pipewire nice=-6 io=(best-effort)0
+        games nice=-5 io=(best-effort)0
+
+        // The compositor must stay ahead of browsers and app workloads.
+        desktop-environment nice=-10 io=(best-effort)0
+
+        foreground nice=0 io=(best-effort)0
+        background nice=6 io="idle"
+
+        session-services nice=9 io="idle" {
+            include cgroup="/user.slice/*.service" parent="systemd"
+            include cgroup="/user.slice/*/session.slice/*" parent="systemd"
+            exclude cgroup="/user.slice/*app-dbus*"
+        }
+
+        system-services nice=12 io="idle" {
+            include cgroup="/system.slice/*"
+        }
+
+        package-manager nice=15 sched="batch" io="idle"
+        batch nice=19 sched="idle" io="idle"
+    }
+
+    exceptions {
+        include descends="chrt"
+        include descends="gamemoderun"
+        include descends="ionice"
+        include descends="nice"
+        include descends="taskset"
+        include descends="schedtool"
+        chrt
+        dbus
+        dbus-broker
+        gamemoderun
+        ionice
+        nice
+        rtkit-daemon
+        systemd
+        taskset
+        schedtool
+    }
+}

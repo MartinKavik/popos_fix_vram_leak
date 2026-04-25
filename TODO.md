@@ -866,3 +866,22 @@ We still need a real-world soak on `minotiros` after the new binary is installed
     - `cargo build --release -p cosmic-comp` passed
     - installed `/usr/bin/cosmic-comp`: `de3e5d977bac95df8294ac32fd825febc1c1d9b12e07fc6a4ccb18db55114f44`
     - rollback backup: [`/usr/bin/cosmic-comp.backup.20260425-201743`](/usr/bin/cosmic-comp.backup.20260425-201743) = `b3e95efd5cd624283b3830a98773e8ec060a77fbcc8ca02c7c66762784b2dab8`
+- April 25 compositor scheduler priority follow-up:
+  - user reported browser/app test loops can freeze the browser and make the whole display laggy
+  - live scheduler state showed a priority inversion:
+    - `cosmic-comp` was `SCHED_OTHER` nice `-3`
+    - Firefox and its content processes were nice `-6`
+    - 1Password processes were nice `-8`
+  - realtime priority was not available (`Max realtime priority 0`) and is intentionally not used, because an unbounded compositor busy loop under realtime scheduling can hard-freeze the machine
+  - immediate runtime fix:
+    - changed the running `cosmic-comp` PID to nice `-10`
+  - persistent system fix:
+    - installed [`system76-scheduler-config.kdl`](/home/martinkavik/repos/popos_fix_vram_leak/system76-scheduler-config.kdl) to [`/etc/system76-scheduler/config.kdl`](/etc/system76-scheduler/config.kdl)
+    - changed the `desktop-environment` assignment from nice `-3` to nice `-10`
+    - restarted `com.system76.Scheduler.service` so it reread the override
+    - verified running `cosmic-comp` is now nice `-10`, ahead of Firefox/1Password but below PipeWire/audio at nice `-15`
+  - queue/leak interpretation from this lag window:
+    - current RSS/FDs did not show the old leak shape (`~426 MiB RSS`, `~301` FDs, no swap pressure)
+    - surface scheduling already coalesces repeated render requests with `render_request_pending` and `QueueState`; this prevents an unbounded queue of render commands
+    - the remaining degradation looks like sustained event/render amplification: noisy clients keep generating commits/input events, and the compositor main thread spends too much time processing them even though duplicate queued renders are suppressed
+    - next compositor-side diagnostic if lag remains after reboot is per-client/per-surface commit attribution, so the logs identify which app/window is producing the commit storm
