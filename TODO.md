@@ -920,6 +920,9 @@ We still need a real-world soak on `minotiros` after the new binary is installed
   - validation:
     - `cargo check -p cosmic-comp` passed
     - `git diff --check` passed
+    - `cargo build --release -p cosmic-comp` passed
+    - installed `/usr/bin/cosmic-comp`: `91fd4ad831f0ed425e074e16b4d8a2bf9c99b1c2ca9778836934a62bcaa031a2`
+    - rollback backup: [`/usr/bin/cosmic-comp.backup.20260425-220813`](/usr/bin/cosmic-comp.backup.20260425-220813) = `de3e5d977bac95df8294ac32fd825febc1c1d9b12e07fc6a4ccb18db55114f44`
   - next runtime interpretation:
     - if lag improves and `commit_schedule_visible_backoff_skips` / `commit_schedule_client_budget_skips` rise during overload, the new admission policy is carrying load
     - if lag remains but top client logs identify Firefox or a specific process as dominant, the next step is a tighter app-specific or surface-role-specific policy
