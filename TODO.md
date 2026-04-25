@@ -861,3 +861,8 @@ We still need a real-world soak on `minotiros` after the new binary is installed
     - during mouse movement, `input_pointer_motion_outputs_considered` should be close to one output per motion event instead of redrawing active/focused/pointer outputs
     - the monitor not containing the pointer should show lower input-origin render pressure
     - if typing/loading animations remain laggy while pointer-motion counters are reduced, the next target is actual workspace/layer render assembly or client commit volume, not input targeting
+  - validation/deployment:
+    - `cargo check -p cosmic-comp` passed
+    - `cargo build --release -p cosmic-comp` passed
+    - installed `/usr/bin/cosmic-comp`: `de3e5d977bac95df8294ac32fd825febc1c1d9b12e07fc6a4ccb18db55114f44`
+    - rollback backup: [`/usr/bin/cosmic-comp.backup.20260425-201743`](/usr/bin/cosmic-comp.backup.20260425-201743) = `b3e95efd5cd624283b3830a98773e8ec060a77fbcc8ca02c7c66762784b2dab8`
