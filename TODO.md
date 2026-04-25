@@ -885,3 +885,42 @@ We still need a real-world soak on `minotiros` after the new binary is installed
     - surface scheduling already coalesces repeated render requests with `render_request_pending` and `QueueState`; this prevents an unbounded queue of render commands
     - the remaining degradation looks like sustained event/render amplification: noisy clients keep generating commits/input events, and the compositor main thread spends too much time processing them even though duplicate queued renders are suppressed
     - next compositor-side diagnostic if lag remains after reboot is per-client/per-surface commit attribution, so the logs identify which app/window is producing the commit storm
+- April 25 overload/backpressure implementation TODOs and checkpoint:
+  - TODO 1: add attribution without behavior change
+    - implemented `[perf] commit attribution stats`
+    - logs top clients and top surfaces by commit count, visible schedules, budget skips, layer schedules, misses, average commit time, and max commit time
+    - client identity is currently PID plus `/proc/<pid>/comm`
+  - TODO 2: add global overload detector
+    - implemented `OverloadLevel::{Normal, Soft, Hard}` in `Shell`
+    - detector evaluates one-second windows using commit rate, visible-schedule pressure, average commit handler time, and max commit handler time
+    - logs `[perf] compositor overload transition` with the old/new level and trigger metrics
+  - TODO 3: add liveness-safe visible commit admission control
+    - implemented `Shell::visible_commit_schedule_decision(...)`
+    - Wayland/Smithay commit processing still runs for every commit
+    - only redundant render scheduling is skipped under overload
+    - per-surface deadline escape hatch allows a schedule after `12ms` in `Soft` overload and `16ms` in `Hard` overload, so videos/animations should not require pointer hover to advance
+    - counters:
+      - `commit_schedule_visible_backoff_skips`
+      - `commit_schedule_visible_backoff_soft_hits`
+      - `commit_schedule_client_budget_skips`
+  - TODO 4: add overload-aware input backpressure
+    - pointer-motion input render interval remains `8ms` in `Normal`
+    - pointer-motion interval becomes `12ms` in `Soft` and `16ms` in `Hard`
+    - broad input events stay at `8ms` to keep keyboard/click/scroll responsive
+    - new counters:
+      - `input_overload_normal_events`
+      - `input_overload_soft_events`
+      - `input_overload_hard_events`
+  - TODO 5: add per-client noisy-source policy
+    - implemented visible scheduling budget per PID
+    - `Soft` overload allows up to `90` visible schedules/sec per client
+    - `Hard` overload allows up to `60` visible schedules/sec per client
+    - per-surface liveness deadline can still override the client budget
+    - stale client budget entries are pruned after inactivity so the budget map does not grow unbounded
+  - validation:
+    - `cargo check -p cosmic-comp` passed
+    - `git diff --check` passed
+  - next runtime interpretation:
+    - if lag improves and `commit_schedule_visible_backoff_skips` / `commit_schedule_client_budget_skips` rise during overload, the new admission policy is carrying load
+    - if lag remains but top client logs identify Firefox or a specific process as dominant, the next step is a tighter app-specific or surface-role-specific policy
+    - if overload stays `Normal` while lag remains, the bottleneck is outside this commit/input admission path
