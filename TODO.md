@@ -837,3 +837,27 @@ We still need a real-world soak on `minotiros` after the new binary is installed
   - expected next-boot interpretation:
     - if `input_schedule_throttled` is high and `surface schedule stats.schedule_requested` falls, input event wakeups were a real remaining amplifier
     - if lag remains while input throttle is low, the next target is still workspace/layer render assembly or external CPU load
+- April 25 pointer-motion redraw follow-up on `6d173390...`:
+  - user reported the session is better but cursor movement, typing, and loading animations are still visibly laggy
+  - live logs from the previous build showed:
+    - input throttling was active, with large `input_schedule_throttled` counts
+    - lookup/index counters remained healthy, so the lag was not caused by surface lookup fallback
+    - output render assembly still ran often, especially on the output containing the pointer
+    - pure pointer motion still used the broad input redraw path, which considered active output, focused output, and pointer output for each event
+  - change in `src/backend/kms/mod.rs`:
+    - classified input redraws into `PointerMotion` and `Broad`
+    - `PointerMotion` and `PointerMotionAbsolute` now collect only outputs containing a seat pointer before/after event processing
+    - keyboard, scroll, button, gesture, touch, tablet, device add/remove, and special events stay on the conservative broad path
+    - expanded `[perf] kms input render stats` with split counters:
+      - `input_pointer_motion_events`
+      - `input_broad_events`
+      - `input_pointer_motion_outputs_considered`
+      - `input_broad_outputs_considered`
+      - `input_pointer_motion_schedule_dispatched`
+      - `input_broad_schedule_dispatched`
+      - `input_pointer_motion_schedule_throttled`
+      - `input_broad_schedule_throttled`
+  - expected next-boot interpretation:
+    - during mouse movement, `input_pointer_motion_outputs_considered` should be close to one output per motion event instead of redrawing active/focused/pointer outputs
+    - the monitor not containing the pointer should show lower input-origin render pressure
+    - if typing/loading animations remain laggy while pointer-motion counters are reduced, the next target is actual workspace/layer render assembly or client commit volume, not input targeting
