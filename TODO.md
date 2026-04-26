@@ -927,3 +927,31 @@ We still need a real-world soak on `minotiros` after the new binary is installed
     - if lag improves and `commit_schedule_visible_backoff_skips` / `commit_schedule_client_budget_skips` rise during overload, the new admission policy is carrying load
     - if lag remains but top client logs identify Firefox or a specific process as dominant, the next step is a tighter app-specific or surface-role-specific policy
     - if overload stays `Normal` while lag remains, the bottleneck is outside this commit/input admission path
+- April 26 overload/backpressure retune after live lag returned:
+  - live facts before the patch:
+    - running compositor was still commit `ebef3a3b` / installed hash `91fd4ad831f0ed425e074e16b4d8a2bf9c99b1c2ca9778836934a62bcaa031a2`
+    - `cosmic-comp` main thread spiked during lag while KMS surface threads were mostly idle
+    - lookup/cache metrics showed the earlier lookup optimizations were working: primary-scanout/index paths dominated and full scans were near zero
+    - top commit source remained Firefox, but diagnostic terminal output also created visible redraw bursts
+    - overload was flapping between `Normal` and `Soft`; it did not stay active long enough and rarely reached `Hard`
+    - visible commit skips were too low relative to total visible commits, so noisy clients still forced too many redraw opportunities
+  - implemented commit `9546189c` in [`/home/martinkavik/repos/cosmic-comp/src/shell/mod.rs`](/home/martinkavik/repos/cosmic-comp/src/shell/mod.rs):
+    - lower overload thresholds to match observed pressure: severe hard at `>=80` visible-pressure/sec or `>=140` commits/sec
+    - make overload state stickier: return to `Normal` only after 10 quiet windows
+    - apply visible commit pacing to every surface while overloaded, not only extreme micro-bursts
+    - `Soft` overload now paces same-surface visible schedules at `24ms`
+    - `Hard` overload now paces same-surface visible schedules at `33ms`
+    - per-client budgets remain as a backstop: `75/sec` in `Soft`, `60/sec` in `Hard`
+    - expanded overload transition logs with visible schedules/sec, layer schedules/sec, skip counts, and consecutive window counters
+  - validation/deployment:
+    - `cargo check -p cosmic-comp` passed
+    - `cargo fmt --check` still reports pre-existing formatting drift in earlier touched files, so no whole-repo formatting was applied
+    - `cargo build --release -p cosmic-comp` passed
+    - installed `/usr/bin/cosmic-comp`: `3f7a8741fe80ffbe2231e67007a7c1528b974518201e93a45cb1e22b4f2c6ba4`
+    - current running compositor is still old hash `91fd4ad831f0ed425e074e16b4d8a2bf9c99b1c2ca9778836934a62bcaa031a2` until compositor/session restart
+    - rollback backup from the still-running old binary: [`/usr/bin/cosmic-comp.backup.20260426-145646`](/usr/bin/cosmic-comp.backup.20260426-145646)
+  - next runtime interpretation:
+    - after restart, overload should enter `Hard` during the visible-pressure bursts that previously only produced brief `Soft`
+    - `commit_schedule_visible_backoff_skips` should rise during laggy/noisy-client periods
+    - videos should continue advancing because `Hard` still allows same-surface schedules roughly every `33ms`
+    - if lag remains while `Hard` and skip counters are active, the next target is render assembly or GPU/KMS submission rather than Wayland surface lookup
