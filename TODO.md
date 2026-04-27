@@ -1026,3 +1026,23 @@ We still need a real-world soak on `minotiros` after the new binary is installed
     - installed `/usr/bin/cosmic-comp`: `a77b33f93a3b804b62078a1455da6ec9aa294a45f460f7d8b9fc5b56c70bf0e6`
     - backup from the previous installed binary: [`/usr/bin/cosmic-comp.backup.20260427-135331`](/usr/bin/cosmic-comp.backup.20260427-135331) = `cd2e510cda2480cbb0e6c2da316cb1fec2ef45a6e5b5bf64fa97792a312b0c48`
     - current running compositor remained old hash `36cedc6702bcbbc130abd665afec2a42d52c62f2f8b6c074d578af361831f9c9` until compositor/session restart
+- April 27 active latest-build lag diagnosis:
+  - live finding:
+    - current running/installed/build compositor matched `a77b33f93a3b804b62078a1455da6ec9aa294a45f460f7d8b9fc5b56c70bf0e6`
+    - `Common::refresh` was causing main-thread stalls, but phase metrics showed the culprit was `toplevel_info_state.refresh`, not `shell.refresh`
+    - recent samples: `refresh_toplevel_info_us_max` around `180-200ms`, while shell/popups/idle/capture phases were tiny
+    - commit attribution still showed noisy clients (`firefox-bin`, `cosmic-term`, `cosmic-panel`), but the direct freeze was the toplevel-info refresh stall
+  - compositor checkpoint:
+    - `b12988fc` paces toplevel-info refresh separately under overload
+    - `Normal`: unchanged cadence
+    - `Soft`: at most once per `750ms`
+    - `Hard`: at most once per `1500ms`
+    - added `refresh_toplevel_info_calls` and `refresh_toplevel_info_skips` counters to `[perf] common refresh stats`
+  - validation/deployment:
+    - `cargo fmt --check` passed
+    - `git diff --check` passed
+    - `cargo check -p cosmic-comp` passed
+    - `cargo build --release -p cosmic-comp` passed
+    - installed `/usr/bin/cosmic-comp`: `6e650b32244209cb6a05c394eea784298acdabaae7a13201272a137faa4802f7`
+    - backup from the previous installed binary: [`/usr/bin/cosmic-comp.backup.20260427-173230`](/usr/bin/cosmic-comp.backup.20260427-173230) = `a77b33f93a3b804b62078a1455da6ec9aa294a45f460f7d8b9fc5b56c70bf0e6`
+    - current running compositor remained old hash `a77b33f93a3b804b62078a1455da6ec9aa294a45f460f7d8b9fc5b56c70bf0e6` until compositor/session restart
