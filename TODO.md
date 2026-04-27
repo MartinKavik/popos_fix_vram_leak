@@ -993,3 +993,14 @@ We still need a real-world soak on `minotiros` after the new binary is installed
     - installed `/usr/bin/cosmic-comp`: `ed6bb24bd6c78210d324c30c0d1d526e65e24633a0447e7e0597fed8f479e793`
     - backup from the previous installed binary: [`/usr/bin/cosmic-comp.backup.20260427-090218`](/usr/bin/cosmic-comp.backup.20260427-090218) = `36cedc6702bcbbc130abd665afec2a42d52c62f2f8b6c074d578af361831f9c9`
     - current running compositor remained old hash `36cedc6702bcbbc130abd665afec2a42d52c62f2f8b6c074d578af361831f9c9` until compositor/session restart
+- April 27 formatting gate fix:
+  - compositor checkpoint:
+    - `28fc3f64` applies `cargo fmt` to the recent lag instrumentation/backpressure files
+  - validation/deployment:
+    - `cargo fmt --check` passed
+    - `git diff --check` passed
+    - `cargo check -p cosmic-comp` passed
+    - `cargo build --release -p cosmic-comp` passed
+    - installed `/usr/bin/cosmic-comp`: `cd2e510cda2480cbb0e6c2da316cb1fec2ef45a6e5b5bf64fa97792a312b0c48`
+    - backup from the previous installed binary: [`/usr/bin/cosmic-comp.backup.20260427-091017`](/usr/bin/cosmic-comp.backup.20260427-091017) = `ed6bb24bd6c78210d324c30c0d1d526e65e24633a0447e7e0597fed8f479e793`
+    - current running compositor remained old hash `36cedc6702bcbbc130abd665afec2a42d52c62f2f8b6c074d578af361831f9c9` until compositor/session restart
