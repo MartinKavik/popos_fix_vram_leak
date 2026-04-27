@@ -955,3 +955,28 @@ We still need a real-world soak on `minotiros` after the new binary is installed
     - `commit_schedule_visible_backoff_skips` should rise during laggy/noisy-client periods
     - videos should continue advancing because `Hard` still allows same-surface schedules roughly every `33ms`
     - if lag remains while `Hard` and skip counters are active, the next target is render assembly or GPU/KMS submission rather than Wayland surface lookup
+- April 27 multi-angle lag/degradation implementation:
+  - live trigger:
+    - latest installed/running compositor from April 26 was active, but `cosmic-comp` main thread still sat around `50-65%` CPU after a long session
+    - lookup metrics were clean, KMS surface threads were mostly idle, and GPU/DRM fault evidence was weak
+    - `prompter`, `codex`, `node`, `cosmic-term`, and `cosmic-edit` were competing with the compositor at high priority before scheduler isolation
+  - scheduler checkpoint in `popos_fix_vram_leak`:
+    - commit `a81e15d` lowers local dev/test tools to nice `8`, batch scheduling, idle I/O
+    - verified after service restart: `cosmic-comp` stayed nice `-10`, while `prompter`, `codex`, `node`, `cosmic-term`, and `cosmic-edit` moved to nice `8`
+  - compositor checkpoints in `cosmic-comp`:
+    - `c6dae592` adds `[perf] main loop stats` and `[perf] overload residency stats`
+    - `47eaed89` adds per-client/output visible admission and throttles unchanged layer render scheduling under overload
+    - `63c57e28` caps output capture pending frames, logs `[perf] capture queue stats`, and reduces capture callback pace in `Hard`
+    - `c8aa1a62` coalesces broad input redraws when an output already has pending render work under overload and adds KMS pending-age/command-latency counters
+  - validation/deployment:
+    - `cargo check -p cosmic-comp` passed
+    - `git diff --check` passed
+    - `cargo build --release -p cosmic-comp` passed
+    - installed `/usr/bin/cosmic-comp`: `36cedc6702bcbbc130abd665afec2a42d52c62f2f8b6c074d578af361831f9c9`
+    - backup from the previous installed binary: [`/usr/bin/cosmic-comp.backup.20260427-083424`](/usr/bin/cosmic-comp.backup.20260427-083424) = `3f7a8741fe80ffbe2231e67007a7c1528b974518201e93a45cb1e22b4f2c6ba4`
+    - current running compositor remained old hash `3f7a8741fe80ffbe2231e67007a7c1528b974518201e93a45cb1e22b4f2c6ba4` until compositor/session restart
+  - next runtime interpretation:
+    - if lag remains, first check `[perf] main loop stats`; this should identify whether CPU is in Wayland dispatch, flush, animation update, refresh, or elsewhere
+    - if visible/layer/capture/input skip counters rise and lag improves, admission pressure was the right fix direction
+    - if `schedule_pending_age_ms_max` or `schedule_command_latency_ms_max` rises, investigate KMS/output queue latency
+    - if capture drops rise heavily, identify the capture client before further compositor throttling
