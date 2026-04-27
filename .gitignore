@@ -1,1 +1,4 @@
 builds/
+egl_gbm_probe
+egl_gbm_probe.c
+fd-logs/
