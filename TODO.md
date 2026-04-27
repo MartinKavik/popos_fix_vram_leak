@@ -980,3 +980,16 @@ We still need a real-world soak on `minotiros` after the new binary is installed
     - if visible/layer/capture/input skip counters rise and lag improves, admission pressure was the right fix direction
     - if `schedule_pending_age_ms_max` or `schedule_command_latency_ms_max` rises, investigate KMS/output queue latency
     - if capture drops rise heavily, identify the capture client before further compositor throttling
+- April 27 visible-render kickstart regression fix:
+  - symptom after reboot into `36cedc67`: videos/animations and some screen updates lagged or stalled unless the mouse cursor moved over them
+  - likely cause: visible commit admission was skipping immediate renders under overload but did not queue a delayed render, so pointer-motion input became the accidental wakeup path
+  - compositor checkpoint:
+    - `748e2669` adds coalesced deferred visible renders after `VisibleBudgetSkipped` decisions
+    - new counters: `commit_schedule_deferred_visible_renders` and `commit_schedule_deferred_visible_render_coalesced`
+  - validation/deployment:
+    - `cargo check -p cosmic-comp` passed
+    - `git diff --check` passed
+    - `cargo build --release -p cosmic-comp` passed
+    - installed `/usr/bin/cosmic-comp`: `ed6bb24bd6c78210d324c30c0d1d526e65e24633a0447e7e0597fed8f479e793`
+    - backup from the previous installed binary: [`/usr/bin/cosmic-comp.backup.20260427-090218`](/usr/bin/cosmic-comp.backup.20260427-090218) = `36cedc6702bcbbc130abd665afec2a42d52c62f2f8b6c074d578af361831f9c9`
+    - current running compositor remained old hash `36cedc6702bcbbc130abd665afec2a42d52c62f2f8b6c074d578af361831f9c9` until compositor/session restart
