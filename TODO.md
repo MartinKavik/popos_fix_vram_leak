@@ -1004,3 +1004,25 @@ We still need a real-world soak on `minotiros` after the new binary is installed
     - installed `/usr/bin/cosmic-comp`: `cd2e510cda2480cbb0e6c2da316cb1fec2ef45a6e5b5bf64fa97792a312b0c48`
     - backup from the previous installed binary: [`/usr/bin/cosmic-comp.backup.20260427-091017`](/usr/bin/cosmic-comp.backup.20260427-091017) = `ed6bb24bd6c78210d324c30c0d1d526e65e24633a0447e7e0597fed8f479e793`
     - current running compositor remained old hash `36cedc6702bcbbc130abd665afec2a42d52c62f2f8b6c074d578af361831f9c9` until compositor/session restart
+- April 27 lag subagent round:
+  - live finding:
+    - current GUI compositor was still `/usr/bin/cosmic-comp (deleted)` = `36cedc6702bcbbc130abd665afec2a42d52c62f2f8b6c074d578af361831f9c9`
+    - installed/build artifact before this round was `cd2e510cda2480cbb0e6c2da316cb1fec2ef45a6e5b5bf64fa97792a312b0c48`
+    - current lag logs were therefore from the older aggressive throttling build, not from the already-installed deferred-render fix
+    - logs showed persistent `Hard` overload, main-loop/refresh spikes around `260-277ms`, low KMS pending age/command latency, and no lookup churn
+    - two `prompter -c` processes were using roughly one CPU core each, but were already nice `8`/batch under scheduler isolation
+  - compositor checkpoint:
+    - `54d123be` retunes overload so skipped visible commits cannot force/hold `Hard` without real commit/main-loop cost
+    - overdue same-surface liveness now bypasses per-client/output budget so a noisy same-PID surface cannot starve another visible surface indefinitely
+    - layer render throttling now resolves layer surfaces through `WindowSurfaceType::ALL`, so subsurface commits are guarded too
+    - broad input redraw pending suppression now skips only when all target output surfaces already have render requests pending
+    - KMS surface pending latches are cleared consistently when queued render state is discarded, and pending-age metrics now survive until the latch is cleared
+    - added `[perf] common refresh stats` phase metrics to identify which refresh maintenance phase causes future stalls
+  - validation/deployment:
+    - `cargo fmt --check` passed
+    - `git diff --check` passed
+    - `cargo check -p cosmic-comp` passed
+    - `cargo build --release -p cosmic-comp` passed
+    - installed `/usr/bin/cosmic-comp`: `a77b33f93a3b804b62078a1455da6ec9aa294a45f460f7d8b9fc5b56c70bf0e6`
+    - backup from the previous installed binary: [`/usr/bin/cosmic-comp.backup.20260427-135331`](/usr/bin/cosmic-comp.backup.20260427-135331) = `cd2e510cda2480cbb0e6c2da316cb1fec2ef45a6e5b5bf64fa97792a312b0c48`
+    - current running compositor remained old hash `36cedc6702bcbbc130abd665afec2a42d52c62f2f8b6c074d578af361831f9c9` until compositor/session restart
