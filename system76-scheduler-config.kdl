@@ -27,6 +27,20 @@ process-scheduler enable=true {
         // The compositor must stay ahead of browsers and app workloads.
         desktop-environment nice=-10 io=(best-effort)0
 
+        // Local dev/test tools can peg CPUs for long periods. Keep them below
+        // compositor priority even when started from a high-priority terminal.
+        dev-tools nice=8 sched="batch" io="idle" {
+            prompter
+            codex
+            node
+            cosmic-term
+            cosmic-edit
+            include name="cargo*"
+            include name="rustc*"
+            include name="rust-analyzer*"
+            include name="zig*"
+        }
+
         foreground nice=0 io=(best-effort)0
         background nice=6 io="idle"
 
